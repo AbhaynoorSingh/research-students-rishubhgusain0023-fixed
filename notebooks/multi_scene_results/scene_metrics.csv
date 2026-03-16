@@ -1,0 +1,6 @@
+scene_id,total_tasks,successful_tasks,failed_tasks,success_rate,avg_path_length_ratio,avg_distance_ratio,num_viewpoints,num_edges,connected_components
+17DRP5sb8fy,3,3,0,1.0,1.0,1.0,44,162,1
+gTV8FGcVJC9,3,3,0,1.0,1.0,1.0,231,726,2
+wc2JMjhGNzB,0,0,0,0.0,inf,inf,169,530,2
+XcA2TqTSSAj,3,3,0,1.0,1.0,1.1762002702680412,109,417,1
+jh4fc5c5qoQ,3,3,0,1.0,1.0,1.0,48,188,1
