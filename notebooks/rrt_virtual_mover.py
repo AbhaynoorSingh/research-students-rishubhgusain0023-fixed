@@ -80,7 +80,7 @@ PUBLISH_HZ           = 20.0
 
 
 # ══════════════════════════════════════════════════════════════
-#  Occupancy Map  (same logic as lidar_slam_planner.py)
+#  Occupancy Map 
 # ══════════════════════════════════════════════════════════════
 class OccupancyMap:
     L_OCC  =  0.85
