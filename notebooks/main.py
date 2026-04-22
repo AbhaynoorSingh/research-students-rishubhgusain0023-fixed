@@ -90,7 +90,7 @@ CAM_HFOV_DEG      = 60.0           # horizontal FOV of camera (degrees)
 SAVE_DIR          = os.path.expanduser("~/scan_images")
 
 # Arm positions
-ARM_HOME          = [90, 90, 90, 90, 90, 90]   # all servos home
+ARM_HOME          = [90, 115, 25, 45, 90, 90]   # all servos home
 ARM_REACH         = [90, 45, 90, 90, 90, 60]   # reach forward
 ARM_GRIP_CLOSE    = 30   # servo 6 angle to close grip
 ARM_GRIP_OPEN     = 90   # servo 6 angle to open grip

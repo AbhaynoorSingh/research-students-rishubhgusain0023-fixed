@@ -1,35 +1,74 @@
-# Pre-Processing and Exploratory Data Analysis
-Once you have your dataset, you need to preprocess it to make it suitable for machine learning. This includes cleaning the data, handling missing values, encoding categorical variables, and scaling numerical features. This step is crucial as the accuracy of your model will depend on the quality of your data. 
+# System Analysis and Environment Characterization
 
+Because this project does not fit the template's default "dataset + machine-learning model" structure, this chapter replaces the original Exploratory Data Analysis content with its closest equivalent for an embedded-robotics project: a structured analysis of the hardware platform, its sensor stack, and the topic landscape produced by the ROS 2 middleware. The goal of the chapter is the same as an EDA chapter in an ML project — to characterize the raw inputs the later methodology will build on — but the inputs in this case are sensor streams, device files, and transform trees rather than tabular datasets.
 
-## Dataset Collection
+## Hardware Platform
 
-## Data Pre-processing
+The experimental platform is a Yahboom ROSMASTER X3 PLUS. Its key components, relevant to the software stack described later, are listed below.
 
-Some issues to consider to be included:
-- Are there missing values in your data? Is there any pattern in whether or not a particular value is missing? How will the missing values be dealt with? 
+- **Base:** Four-wheeled Mecanum-drive mobile base with a Yahboom motor-control board connected to the main computer over USB serial.
+- **Main computer:** NVIDIA Jetson module running Ubuntu 22.04 with ROS 2 Humble installed. The Jetson hosts all nodes: drivers, SLAM, planning, detection, and the task state machine.
+- **LiDAR:** 360-degree YDLiDAR unit mounted above the chassis, producing `sensor_msgs/LaserScan` messages on `/scan`.
+- **RGB-D camera:** Orbbec Astra Pro Plus mounted forward-facing, providing both colour and depth streams.
+- **Manipulator arm:** Six-degree-of-freedom arm (servo IDs 1–6, with servo 1 at the base) mounted on the chassis, with servo 6 serving as the gripper.
+- **Wrist camera:** A small UVC camera mounted on the arm, exposed to Linux as `/dev/video0`.
 
-- Are there problems because of data size (rows or columns)? Are some algorithms more affected? Can you come up with any solutions?
+## Sensor and Device Characterization
 
-- If you are doing any clustering, are there clusters in the data? How many? How well separated are they? Do different methods agree on the number of clusters?
+Before any higher-level SLAM or planning code could be written, the following properties of the sensor stack had to be discovered experimentally. Each of the findings below represents a concrete blocker that was encountered during the early weeks of the project.
 
-- Is scaling of the variables an issue? For what methods?
+### Motor controller serial port
 
-- Are there outliers in the data? How did you deal with them? 
+The Yahboom documentation suggests that the motor controller is reachable on `/dev/ttyUSB0`. On the specific Jetson image used in this project, the correct device file turned out to be `/dev/ttyUSB1`. Running the `Mcnamu_driver_X3` node against `/dev/ttyUSB0` produced no visible error but also produced no motion; the driver opened a device that did not respond to its command protocol. The fix was to set the driver parameter to `/dev/ttyUSB1`. In addition, the operating user (`jetson`) was not a member of the `dialout` group, which silently prevented driver communication; adding the user to the group and restarting fixed the issue.
 
-- Does transforming the data simplify any analysis?
+### Astra Pro Plus UVC product identifier
 
-## Exploratory Data Analysis and Visualisations 
+The Astra Pro Plus does not present the same UVC product identifier as the more common Astra Pro. The default Orbbec launch files assume the common identifier (`0x0501`), and launching them results in either no color stream or a stream with mis-advertised calibration. Through trial and error the correct product ID was identified as `0x050f`, and the specific launch file required to start the camera is `astro_pro_plus.launch.xml` from the Orbbec ROS 2 package. With this launch file, the camera publishes `/color/image_raw`, `/depth/image_raw`, and `/color/camera_info`, which are the three topics consumed by the RTAB-Map pipeline described in the methodology [@labbe_rtab-map_2019].
 
-Some of the steps, included here:
+### `/dev/video0` contention between the arm camera and the Astra
 
-- Data visualization: Data visualization is the process of creating graphs and charts to help you understand the patterns and trends in the data. This step can help you identify outliers and anomalies in the data.
+A subtle but important finding is that the Astra Pro Plus's color sensor and the arm's wrist camera both present themselves as `/dev/video0` on the Jetson. Only one can be used at a time. Launching the Astra node while the arm camera is already opened by `Rosmaster_Camera` (or vice versa) results in one of the two silently failing. This drove the design of the arm-scan node, described in the methodology, which is written with two camera sources and a fallback policy: it prefers `Rosmaster_Camera` if it can open `/dev/video0` directly, and otherwise falls back to the Astra topic.
 
-- Statistical analysis: Statistical analysis involves applying statistical methods to the data to identify patterns, trends, and relationships. This step can help you identify correlations between variables and understand the distribution of the data.
+### `base_footprint` transform
 
-- Feature selection: Feature selection is the process of selecting the most important variables that will be used in the machine learning model. This step can help you identify which variables are most predictive and which variables can be ignored.
+Early attempts to run RTAB-Map against the Astra topics failed because the transform chain was incomplete. The required `base_footprint` frame is published by `display_X3.launch.py` from the `yahboomcar_description` package, not by the motor driver as might be assumed. Once this launch file is added at the top of the startup sequence, the full transform tree (`map → odom → base_footprint → sensor frames`) is available and downstream nodes run correctly.
 
-- Dimensionality reduction: Dimensionality reduction is the process of reducing the number of variables in the data set. This step can help you reduce the complexity of the model and improve its performance.
+## ROS 2 Topic Landscape
 
+Table 1 summarizes the topics produced and consumed by the subsystems described in the next chapter. These were identified via repeated use of `ros2 topic list`, `ros2 topic info`, and `ros2 topic echo` during the bring-up phase, and serve as the "interface contract" between modules of the system.
 
-## Other Related Sections (Optional)
+| Topic                | Type                        | Producer                      | Consumer(s)                      |
+|----------------------|-----------------------------|-------------------------------|----------------------------------|
+| `/scan`              | `sensor_msgs/LaserScan`     | YDLiDAR driver                | SLAM module, A\* planner          |
+| `/color/image_raw`   | `sensor_msgs/Image`         | Astra Pro Plus node           | RTAB-Map, YOLO scanner (fallback)|
+| `/depth/image_raw`   | `sensor_msgs/Image`         | Astra Pro Plus node           | RTAB-Map                          |
+| `/color/camera_info` | `sensor_msgs/CameraInfo`    | Astra Pro Plus node           | RTAB-Map                          |
+| `/odom`              | `nav_msgs/Odometry`         | `base_node_X3`                | SLAM module, all planners         |
+| `/cmd_vel`           | `geometry_msgs/Twist`       | Task node, virtual mover      | `Mcnamu_driver_X3`                |
+| `/map`               | `nav_msgs/OccupancyGrid`    | SLAM module                   | Planners, RViz                    |
+| `/planned_path`      | `nav_msgs/Path`             | A\* / RRT\* planner            | Virtual mover, RViz               |
+| `/task`              | `std_msgs/String`           | User (CLI or GUI)             | Task state machine                |
+| `/scan_image`        | `sensor_msgs/Image`         | Arm scanner                   | YOLO detector                     |
+| `/goal`              | `geometry_msgs/Point`       | Task state machine            | Planner                           |
+
+: Interface topics between subsystems {#tbl-topics}
+
+## Startup Sequence Discovery
+
+A significant portion of the first month of the project was spent identifying a startup sequence that reliably brings up every subsystem. The following order was determined empirically and is now documented inside the repository:
+
+1. `ros2 launch yahboomcar_description display_X3.launch.py` — publishes URDF and `base_footprint` transform.
+2. `ros2 run yahboomcar_bringup Mcnamu_driver_X3` — opens the motor controller on `/dev/ttyUSB1` and subscribes to `/cmd_vel`.
+3. `ros2 run yahboomcar_base_node base_node_X3` — publishes `/odom` from wheel encoders. Note that this node lives in a separate package (`yahboomcar_base_node`) from the motor driver, a fact that is not obvious from the default Yahboom documentation.
+4. `ros2 launch orbbec_camera astro_pro_plus.launch.xml` — starts the RGB-D camera on the correct UVC product ID.
+5. `ros2 launch <user_pkg> x3_rtabmap_depth.launch.py` — starts the RGB-D synchronizer, visual odometry, and RTAB-Map SLAM.
+
+Running these out of order produces either missing transforms, missing camera info, or driver-open failures. Running them in the order above yields a working system in roughly 20 seconds.
+
+![Placeholder: Photograph of the physical ROSMASTER X3 PLUS platform with the Astra Pro Plus, LiDAR, and arm visible. Replace with a real photo before submission.](../figures/robot_photo.jpg){#fig-robot width=70%}
+
+![Placeholder: Example RTAB-Map 3D point-cloud reconstruction of the lab room. Replace with a real screenshot before submission.](../figures/rtabmap_cloud.png){#fig-rtabmap-cloud width=85%}
+
+## Summary
+
+The chapter has characterized the hardware, the ROS 2 topic graph, and the startup sequence that the rest of this report assumes. Three concrete, non-obvious findings were documented — the `/dev/ttyUSB1` motor controller path, the `0x050f` UVC product identifier handled by `astro_pro_plus.launch.xml`, and the `/dev/video0` mutual-exclusion between the Astra color stream and the arm wrist camera — each of which directly shaped the software design described in the next chapter.
