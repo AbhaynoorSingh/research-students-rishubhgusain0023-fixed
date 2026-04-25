@@ -164,6 +164,10 @@ Each subsystem was independently verified at various points during development, 
 *Video: Demonstration of the arm-camera sweep routine executing on the physical robot. The base servo (servo ID 1) moves through the three configured scan positions (45°, 90°, 135°), pausing briefly at each to capture a frame for YOLOv8 inference. The sweep shown here is from a verification run; during the end-to-end test described above, YOLOv8 detected a chair at the 45° position with confidence 0.84.*
 :::
 
+::: {.content-visible when-format="pdf"}
+*(Video demonstration available in the HTML version of this report.)*
+:::
+
 ## Sensitivity Analysis
 
 Two parameters were informally varied during development.

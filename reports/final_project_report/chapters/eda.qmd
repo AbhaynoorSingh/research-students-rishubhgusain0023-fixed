@@ -65,9 +65,8 @@ A significant portion of the first month of the project was spent identifying a 
 
 Running these out of order produces either missing transforms, missing camera info, or driver-open failures. Running them in the order above yields a working system in roughly 20 seconds.
 
-![Placeholder: Photograph of the physical ROSMASTER X3 PLUS platform with the Astra Pro Plus, LiDAR, and arm visible. Replace with a real photo before submission.](../figures/robot_photo.jpg){#fig-robot width=70%}
+![The Yahboom ROSMASTER X3 PLUS platform used throughout this project, showing the Mecanum-wheel base, the 360-degree YDLiDAR, the forward-facing Orbbec Astra Pro Plus RGB-D camera, and the six-degree-of-freedom manipulator arm with wrist-mounted camera.](../figures/robot_photo.jpg){#fig-robot width=70%}
 
-![Placeholder: Example RTAB-Map 3D point-cloud reconstruction of the lab room. Replace with a real screenshot before submission.](../figures/rtabmap_cloud.png){#fig-rtabmap-cloud width=85%}
 
 ## Summary
 
