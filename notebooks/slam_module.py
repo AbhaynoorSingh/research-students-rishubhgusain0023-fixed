@@ -140,6 +140,9 @@ class _OccupancyMap:
     def probability_grid(self) -> np.ndarray:
         """Return [0,1] probability grid: 1.0 = definitely occupied."""
         return 1.0 - 1.0 / (1.0 + np.exp(self.log_odds))
+      
+    def inflated_mask(self):
+        return self.obstacle_mask()
 
     def obstacle_mask(self) -> np.ndarray:
         return self.probability_grid() > 0.65
