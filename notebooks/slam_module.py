@@ -52,10 +52,24 @@ class _OccupancyMap:
         self.origin_x = -width_m  / 2.0
         self.origin_y = -height_m / 2.0
         self._reset_grid()
+        self.add_test_obstacles()
 
     def _reset_grid(self):
         # -1.0 = completely unknown
         self.log_odds = np.full((self.w, self.h), -1.0, dtype=np.float32)
+
+    def add_test_obstacles(self):
+        """Add artificial obstacles for RRT testing."""
+
+        # Vertical wall
+        for x in range(180, 190):
+            for y in range(120, 280):
+                self.log_odds[x, y] = self.L_MAX
+
+        # Small block obstacle
+        for x in range(250, 280):
+            for y in range(200, 230):
+                self.log_odds[x, y] = self.L_MAX
 
     def reset(self):
         self._reset_grid()

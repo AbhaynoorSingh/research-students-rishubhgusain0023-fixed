@@ -61,7 +61,7 @@ from tf2_ros import TransformBroadcaster
 # RRT parameters
 MAX_ITERATIONS   = 5000    # max RRT iterations before giving up
 STEP_SIZE        = 0.30    # metres per RRT extension step
-GOAL_BIAS        = 0.10    # probability of sampling goal directly
+GOAL_BIAS        = 0.30    # probability of sampling goal directly
 GOAL_TOLERANCE   = 0.30    # metres — goal reached threshold
 INFLATION_M      = 0.20    # obstacle inflation radius (robot radius)
 USE_RRT_STAR     = True    # True = RRT* (rewiring for shorter paths)
@@ -206,7 +206,9 @@ class RRTPlanner:
         Returns list of (x, y) world-coord waypoints, or [] on failure.
         """
         obs = self.map.inflated_mask()
-
+ 
+        start_time = time.time()
+        
         sx, sy = start_world
         gx, gy = goal_world
 
@@ -273,7 +275,16 @@ class RRTPlanner:
         if goal_node_idx is None:
             return []
 
-        return self._extract_path(nodes, goal_node_idx)
+        path = self._extract_path(nodes, goal_node_idx)
+        # Step 1: averaging smooth
+        path = self.smooth_path(path)
+
+        # Step 2: shortcut smooth (NEW)
+        path = self.shortcut_smooth(path)
+        elapsed = time.time() - start_time
+        print(f"[RRT*] Time: {elapsed:.3f}s | Nodes: {len(nodes)}")
+
+        return path
 
     def get_tree_edges(self, nodes):
         """Return list of (x0,y0,x1,y1) for RViz tree visualisation."""
@@ -315,7 +326,9 @@ class RRTPlanner:
         best_cost   = float('inf')
         for i, node in enumerate(nodes):
             d = math.hypot(node.x - nx, node.y - ny)
-            if d > RRT_STAR_RADIUS:
+            radius = min(RRT_STAR_RADIUS, math.sqrt(math.log(len(nodes) + 1) / (len(nodes) + 1)) * 5.0)
+
+            if d > radius:
                 continue
             if not self._collision_free(node.x, node.y, nx, ny, obs):
                 continue
@@ -337,7 +350,9 @@ class RRTPlanner:
             if i == new_idx or i == new_node.parent:
                 continue
             d = math.hypot(node.x - new_node.x, node.y - new_node.y)
-            if d > RRT_STAR_RADIUS:
+            radius = min(RRT_STAR_RADIUS,math.sqrt(math.log(len(nodes) + 1) / (len(nodes) + 1)) * 5.0)
+
+            if d > radius:
                 continue
             new_cost = new_node.cost + d
             if new_cost < node.cost and \
@@ -378,7 +393,26 @@ class RRTPlanner:
                     (pts[i-1][1] + pts[i][1] + pts[i+1][1]) / 3.0,
                 )
         return pts
+   
+    def shortcut_smooth(self, path, iterations=50):
+        """Remove unnecessary waypoints by connecting distant nodes directly."""
+        if len(path) < 3:
+            return path
 
+        import random
+        new_path = list(path)
+
+        for _ in range(iterations):
+            i = random.randint(0, len(new_path) - 2)
+            j = random.randint(i + 1, len(new_path) - 1)
+
+            x1, y1 = new_path[i]
+            x2, y2 = new_path[j]
+
+            if self._collision_free(x1, y1, x2, y2, self.map.inflated_mask()):
+                if j != len(new_path) - 1:
+                    new_path = new_path[:i+1] + new_path[j:]
+        return new_path
 
 # ══════════════════════════════════════════════════════════════
 #  Helpers
