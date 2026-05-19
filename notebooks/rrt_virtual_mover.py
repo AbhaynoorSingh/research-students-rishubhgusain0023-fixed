@@ -179,6 +179,117 @@ class OccupancyMap:
         grid.data = ros_data.flatten(order='F').tolist()
         return grid
 
+# ============================================================
+# Quad RRT
+# ============================================================
+class QuadTreeNode:
+    def __init__(self, x, y, node_index):
+        self.x = x
+        self.y = y
+        self.node_index = node_index
+
+
+class QuadTree:
+    MAX_POINTS = 8
+
+    def __init__(self, x, y, w, h, depth=0):
+        self.x = x
+        self.y = y
+        self.w = w
+        self.h = h
+        self.depth = depth
+
+        self.points = []
+
+        self.divided = False
+
+        self.nw = None
+        self.ne = None
+        self.sw = None
+        self.se = None
+
+    def contains(self, x, y):
+        return (
+            self.x <= x < self.x + self.w and
+            self.y <= y < self.y + self.h
+        )
+
+    def subdivide(self):
+        hw = self.w / 2
+        hh = self.h / 2
+
+        self.nw = QuadTree(self.x, self.y, hw, hh, self.depth + 1)
+        self.ne = QuadTree(self.x + hw, self.y, hw, hh, self.depth + 1)
+        self.sw = QuadTree(self.x, self.y + hh, hw, hh, self.depth + 1)
+        self.se = QuadTree(self.x + hw, self.y + hh, hw, hh, self.depth + 1)
+
+        self.divided = True
+
+    def insert(self, point):
+        if not self.contains(point.x, point.y):
+            return False
+
+        if len(self.points) < self.MAX_POINTS:
+            self.points.append(point)
+            return True
+
+        if not self.divided:
+            self.subdivide()
+
+        return (
+            self.nw.insert(point) or
+            self.ne.insert(point) or
+            self.sw.insert(point) or
+            self.se.insert(point)
+        )
+
+    def query_radius(self, x, y, radius, found=None):
+        if found is None:
+            found = []
+
+        if not self._intersects_circle(x, y, radius):
+            return found
+
+        r2 = radius * radius
+
+        for p in self.points:
+            dx = p.x - x
+            dy = p.y - y
+            if dx*dx + dy*dy <= r2:
+                found.append(p.node_index)
+
+        if self.divided:
+            self.nw.query_radius(x, y, radius, found)
+            self.ne.query_radius(x, y, radius, found)
+            self.sw.query_radius(x, y, radius, found)
+            self.se.query_radius(x, y, radius, found)
+
+        return found
+
+    def nearest(self, x, y, best=None):
+        for p in self.points:
+            d = (p.x - x)**2 + (p.y - y)**2
+
+            if best is None or d < best[0]:
+                best = (d, p.node_index)
+
+        if self.divided:
+            for child in [self.nw, self.ne, self.sw, self.se]:
+                best = child.nearest(x, y, best)
+
+        return best
+
+    def _intersects_circle(self, x, y, r):
+        nearest_x = max(self.x, min(x, self.x + self.w))
+        nearest_y = max(self.y, min(y, self.y + self.h))
+
+        dx = x - nearest_x
+        dy = y - nearest_y
+
+        return dx*dx + dy*dy <= r*r
+
+
+
 
 # ══════════════════════════════════════════════════════════════
 #  RRT / RRT* Planner
@@ -193,11 +304,11 @@ class RRTNode:
         self.cost   = cost     # RRT* path cost from root
 
 
-class RRTPlanner:
+class QuadRRTPlanner:
 
     def __init__(self, occ_map: OccupancyMap):
         self.map = occ_map
-
+        self.quadtree = None
     # ── public API ─────────────────────────────────────────────
 
     def plan(self, start_world, goal_world):
@@ -206,8 +317,23 @@ class RRTPlanner:
         Returns list of (x, y) world-coord waypoints, or [] on failure.
         """
         obs = self.map.inflated_mask()
- 
+
         start_time = time.time()
+
+        # Map bounds in world coordinates
+        wx_min = self.map.origin_x
+        wx_max = self.map.origin_x + self.map.w * self.map.res
+
+        wy_min = self.map.origin_y
+        wy_max = self.map.origin_y + self.map.h * self.map.res
+
+        # Create QuadTree
+        self.quadtree = QuadTree(
+            wx_min,
+            wy_min,
+            wx_max - wx_min,
+            wy_max - wy_min
+        )
         
         sx, sy = start_world
         gx, gy = goal_world
@@ -231,6 +357,9 @@ class RRTPlanner:
         wy_max = self.map.origin_y + self.map.h * self.map.res
 
         nodes = [RRTNode(sx, sy, parent=None, cost=0.0)]
+        self.quadtree.insert(
+        QuadTreeNode(sx, sy, 0)
+        )
         goal_node_idx = None
 
         for _ in range(MAX_ITERATIONS):
@@ -242,7 +371,7 @@ class RRTPlanner:
                 ry = random.uniform(wy_min, wy_max)
 
             # Nearest node
-            nearest_idx = self._nearest(nodes, rx, ry)
+            nearest_idx = self.quadtree.nearest(rx, ry)[1]
             nearest     = nodes[nearest_idx]
 
             # Steer
@@ -261,11 +390,15 @@ class RRTPlanner:
                     nodes, nx, ny, new_cost, obs)
                 new_idx = len(nodes)
                 nodes.append(new_node)
+                self.quadtree.insert(
+                QuadTreeNode(nx, ny, len(nodes)-1)
+                )   
                 # Rewire
                 self._rewire(nodes, new_idx, obs)
             else:
                 new_node = RRTNode(nx, ny, parent=nearest_idx, cost=new_cost)
                 nodes.append(new_node)
+
 
             # Goal check
             if math.hypot(nx - gx, ny - gy) <= GOAL_TOLERANCE:
@@ -324,7 +457,12 @@ class RRTPlanner:
         """RRT*: pick parent that gives lowest cost."""
         best_parent = None
         best_cost   = float('inf')
-        for i, node in enumerate(nodes):
+        nearby = self.quadtree.query_radius(
+        nx, ny, RRT_STAR_RADIUS
+        )
+
+        for i in nearby:
+            node = nodes[i]
             d = math.hypot(node.x - nx, node.y - ny)
             radius = min(RRT_STAR_RADIUS, math.sqrt(math.log(len(nodes) + 1) / (len(nodes) + 1)) * 5.0)
 
@@ -346,7 +484,14 @@ class RRTPlanner:
     def _rewire(self, nodes, new_idx, obs):
         """RRT*: check if routing through new_node shortens neighbour costs."""
         new_node = nodes[new_idx]
-        for i, node in enumerate(nodes):
+        nearby = self.quadtree.query_radius(
+        new_node.x,
+        new_node.y,
+        RRT_STAR_RADIUS
+        )
+
+        for i in nearby:
+            node = nodes[i]
             if i == new_idx or i == new_node.parent:
                 continue
             d = math.hypot(node.x - new_node.x, node.y - new_node.y)

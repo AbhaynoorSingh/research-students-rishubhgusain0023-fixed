@@ -48,7 +48,7 @@ from tf2_ros import TransformBroadcaster
 
 # ── Project modules ───────────────────────────────────────────
 from slam_module import SLAMModule, SLAMResult
-from rrt_virtual_mover import RRTPlanner
+from rrt_virtual_mover import QuadRRTPlanner
 from lidar_slam_planner import GridPathPlanner, NavigationMetrics
 
 # ── Rosmaster_Camera (direct OpenCV) ─────────────────────────
@@ -161,7 +161,7 @@ class UnifiedMainNode(Node):
         self.slam.reset()
 
         # ── Planners ─────────────────────────────────────────
-        self.rrt_planner   = RRTPlanner(self.slam._map)
+        self.rrt_planner = QuadRRTPlanner(self.slam._map)
         self.astar_planner = GridPathPlanner(
             self.slam._map, inflation_radius_m=0.15)
 
