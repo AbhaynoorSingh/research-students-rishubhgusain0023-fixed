@@ -81,6 +81,7 @@ GOAL_TOL          = 0.30    # metres — goal reached threshold
 PUBLISH_HZ        = 20.0    # control loop rate
 REPLAN_EVERY_N    = 20      # replan every N scans
 REPLAN_COOLDOWN   = 2.0     # seconds between replans
+SIMULATION_MODE = True
 
 # Camera / arm scan
 SCAN_POSITIONS    = [45, 90, 135]   # servo 1 angles for visual scan
@@ -133,6 +134,24 @@ class TaskState:
     DONE        = "done"
     FAILED      = "failed"
 
+class RobotState:
+    """
+    Centralized robot state.
+    Acts as single source of truth for robot pose.
+    """
+
+    def __init__(self):
+        self.x = 0.0
+        self.y = 0.0
+        self.yaw = 0.0
+
+    def update(self, x, y, yaw):
+        self.x = x
+        self.y = y
+        self.yaw = yaw
+
+    def pose(self):
+        return (self.x, self.y, self.yaw)
 
 # ══════════════════════════════════════════════════════════════
 #  Main unified node
@@ -173,7 +192,10 @@ class UnifiedMainNode(Node):
         self.metrics        = None
         self.active_planner = "none"
 
-        # ── Virtual robot pose ────────────────────────────────
+        # ── Centralized robot state ──────────────────────────
+        self.robot_state = RobotState()
+
+        # Virtual pose mirrors robot_state in simulation mode
         self.vx   = 0.0
         self.vy   = 0.0
         self.vyaw = 0.0
@@ -376,7 +398,11 @@ class UnifiedMainNode(Node):
         self._scan_count += 1
 
         if self.metrics:
-            self.metrics.update(x, y)
+            if SIMULATION_MODE:
+                self.metrics.update(self.vx, self.vy)
+            else:
+                self.metrics.update(x, y)
+
             if self.metrics.reached:
                 self._on_goal_reached()
                 return
@@ -616,8 +642,20 @@ class UnifiedMainNode(Node):
                 self.vx   += step * math.cos(target_yaw)
                 self.vy   += step * math.sin(target_yaw)
                 self.vyaw  = target_yaw
+                # Update centralized robot state
+                self.robot_state.update(
+                    self.vx,
+                    self.vy,
+                    self.vyaw
+                )
                 self._latest_action = "forward"
-
+                
+                if self.metrics and SIMULATION_MODE:
+                    self.metrics.update(
+                        self.robot_state.x,
+                        self.robot_state.y
+                    )
+                
                 twist = Twist()
                 twist.linear.x  = ROBOT_SPEED_MPS
                 twist.angular.z = 0.0
