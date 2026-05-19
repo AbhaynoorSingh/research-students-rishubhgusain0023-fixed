@@ -288,7 +288,7 @@ class UnifiedMainNode(Node):
         self.get_logger().info("=" * 55)
         self.get_logger().info("  UnifiedMainNode ready")
         self.get_logger().info("  SLAM     : slam_module.py")
-        self.get_logger().info("  Primary  : RRT*")
+        self.get_logger().info("  Primary  : Quad RRT*")
         self.get_logger().info("  Fallback : A*")
         self.get_logger().info(
             f"  Camera   : {'YES' if self.camera else 'NO'}")

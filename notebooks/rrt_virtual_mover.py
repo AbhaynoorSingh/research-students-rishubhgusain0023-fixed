@@ -309,6 +309,7 @@ class QuadRRTPlanner:
     def __init__(self, occ_map: OccupancyMap):
         self.map = occ_map
         self.quadtree = None
+        print("[INFO] QuadRRTPlanner initialized")
     # ── public API ─────────────────────────────────────────────
 
     def plan(self, start_world, goal_world):
