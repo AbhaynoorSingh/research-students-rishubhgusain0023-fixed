@@ -549,7 +549,7 @@ class UnifiedMainNode(Node):
         dt   = time.time() - t0
 
         if path:
-            self.waypoints      = self.rrt_planner.smooth_path(path)
+            self.waypoints      = path
             self.wp_index       = 1
             self.is_moving      = True
             self.active_planner = "rrt"

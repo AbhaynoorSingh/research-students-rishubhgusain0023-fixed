@@ -267,14 +267,34 @@ class QuadTree:
         return found
 
     def nearest(self, x, y, best=None):
+
+    # Check points in current node
         for p in self.points:
             d = (p.x - x)**2 + (p.y - y)**2
 
             if best is None or d < best[0]:
-                best = (d, p.node_index)
+             best = (d, p.node_index)
 
+    # If subdivided → search children intelligently
         if self.divided:
-            for child in [self.nw, self.ne, self.sw, self.se]:
+
+            children = [self.nw, self.ne, self.sw, self.se]
+
+            # Sort children by proximity to query point
+            children.sort(
+                key=lambda child:
+                child.distance_to_boundary(x, y)
+            )
+
+            for child in children:
+
+                # If this quadrant cannot contain closer point → skip
+                if best is not None:
+                    min_possible_dist = child.distance_to_boundary(x, y)
+
+                    if min_possible_dist > best[0]:
+                        continue
+
                 best = child.nearest(x, y, best)
 
         return best
@@ -287,6 +307,27 @@ class QuadTree:
         dy = y - nearest_y
 
         return dx*dx + dy*dy <= r*r
+
+    def distance_to_boundary(self, x, y):
+        """
+        Minimum squared distance from point (x,y)
+        to this QuadTree region.
+        """
+
+        dx = 0.0
+        dy = 0.0
+
+        if x < self.x:
+            dx = self.x - x
+        elif x > self.x + self.w:
+            dx = x - (self.x + self.w)
+
+        if y < self.y:
+            dy = self.y - y
+        elif y > self.y + self.h:
+            dy = y - (self.y + self.h)
+
+        return dx*dx + dy*dy    
 
 
 
@@ -309,6 +350,7 @@ class QuadRRTPlanner:
     def __init__(self, occ_map: OccupancyMap):
         self.map = occ_map
         self.quadtree = None
+        self.latest_nodes = []
         print("[INFO] QuadRRTPlanner initialized")
     # ── public API ─────────────────────────────────────────────
 
@@ -399,10 +441,13 @@ class QuadRRTPlanner:
             else:
                 new_node = RRTNode(nx, ny, parent=nearest_idx, cost=new_cost)
                 nodes.append(new_node)
+                self.quadtree.insert(
+                QuadTreeNode(nx, ny, len(nodes)-1)
+                )
 
 
             # Goal check
-            if math.hypot(nx - gx, ny - gy) <= GOAL_TOLERANCE:
+            if ( math.hypot(nx-gx, ny-gy) <= GOAL_TOLERANCE and self._collision_free(nx, ny, gx, gy, obs)):
                 goal_node_idx = len(nodes) - 1
                 break
 
@@ -415,6 +460,7 @@ class QuadRRTPlanner:
 
         # Step 2: shortcut smooth (NEW)
         path = self.shortcut_smooth(path)
+        self.latest_nodes = nodes
         elapsed = time.time() - start_time
         print(f"[RRT*] Time: {elapsed:.3f}s | Nodes: {len(nodes)}")
 
@@ -462,10 +508,10 @@ class QuadRRTPlanner:
         nx, ny, RRT_STAR_RADIUS
         )
 
+        radius = max(0.5,min(RRT_STAR_RADIUS,2.0 * math.sqrt(math.log(len(nodes)+1)/(len(nodes)+1))))
         for i in nearby:
             node = nodes[i]
             d = math.hypot(node.x - nx, node.y - ny)
-            radius = min(RRT_STAR_RADIUS, math.sqrt(math.log(len(nodes) + 1) / (len(nodes) + 1)) * 5.0)
 
             if d > radius:
                 continue
@@ -491,12 +537,12 @@ class QuadRRTPlanner:
         RRT_STAR_RADIUS
         )
 
+        radius = max(0.5,min(RRT_STAR_RADIUS,2.0 * math.sqrt(math.log(len(nodes)+1)/(len(nodes)+1))))
         for i in nearby:
             node = nodes[i]
             if i == new_idx or i == new_node.parent:
                 continue
             d = math.hypot(node.x - new_node.x, node.y - new_node.y)
-            radius = min(RRT_STAR_RADIUS,math.sqrt(math.log(len(nodes) + 1) / (len(nodes) + 1)) * 5.0)
 
             if d > radius:
                 continue
@@ -506,6 +552,29 @@ class QuadRRTPlanner:
                                     node.x, node.y, obs):
                 node.parent = new_idx
                 node.cost   = new_cost
+                self._update_children_costs(nodes, i)
+
+    def _update_children_costs(self, nodes, parent_idx):
+        """
+        Recursively update costs of all descendants
+        after a rewire operation.
+        """
+
+        parent = nodes[parent_idx]
+
+        for i, node in enumerate(nodes):
+
+            if node.parent == parent_idx:
+
+                edge_cost = math.hypot(
+                    node.x - parent.x,
+                    node.y - parent.y
+                )
+
+                node.cost = parent.cost + edge_cost
+
+                # Recursively update grandchildren
+                self._update_children_costs(nodes, i)
 
     def _extract_path(self, nodes, goal_idx):
         path = []
@@ -548,16 +617,15 @@ class QuadRRTPlanner:
         import random
         new_path = list(path)
 
+        obs = self.map.inflated_mask()
         for _ in range(iterations):
             i = random.randint(0, len(new_path) - 2)
             j = random.randint(i + 1, len(new_path) - 1)
 
             x1, y1 = new_path[i]
             x2, y2 = new_path[j]
-
-            if self._collision_free(x1, y1, x2, y2, self.map.inflated_mask()):
-                if j != len(new_path) - 1:
-                    new_path = new_path[:i+1] + new_path[j:]
+            if self._collision_free(x1, y1, x2, y2, obs):
+                new_path = new_path[:i+1] + new_path[j:]
         return new_path
 
 # ══════════════════════════════════════════════════════════════
@@ -578,7 +646,7 @@ class RRTVirtualMoverNode(Node):
         super().__init__("rrt_virtual_mover")
 
         self.occ_map = OccupancyMap()
-        self.planner = RRTPlanner(self.occ_map)
+        self.planner = QuadRRTPlanner(self.occ_map)
 
         # Robot pose (virtual)
         self.x   = 0.0
@@ -654,6 +722,7 @@ class RRTVirtualMoverNode(Node):
 
         t0 = time.time()
         path = self.planner.plan((self.x, self.y), goal)
+        self.rrt_nodes = self.planner.latest_nodes
         elapsed = time.time() - t0
 
         if not path:
