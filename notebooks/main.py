@@ -79,7 +79,7 @@ ROBOT_SPEED_MPS   = 0.3     # virtual movement speed (m/s)
 WAYPOINT_TOL      = 0.10    # metres — waypoint reached threshold
 GOAL_TOL          = 0.30    # metres — goal reached threshold
 PUBLISH_HZ        = 20.0    # control loop rate
-REPLAN_EVERY_N    = 20      # replan every N scans
+REPLAN_EVERY_N    = 100      # replan every N scans
 REPLAN_COOLDOWN   = 2.0     # seconds between replans
 
 # Camera / arm scan
@@ -174,9 +174,9 @@ class UnifiedMainNode(Node):
         self.active_planner = "none"
 
         # ── Virtual robot pose ────────────────────────────────
-        self.vx   = 0.0
-        self.vy   = 0.0
-        self.vyaw = 0.0
+        self.vx   = self.slam.pose[0]
+        self.vy   = self.slam.pose[1]
+        self.vyaw = self.slam.pose[2]
 
         # ── Sensor cache ─────────────────────────────────────
         self._latest_scan   = None
@@ -320,7 +320,8 @@ class UnifiedMainNode(Node):
         self.goal = (msg.x, msg.y)
         self.get_logger().info(
             f"[GOAL] Raw goal: ({msg.x:.2f}, {msg.y:.2f})")
-        x, y, _ = self.slam.pose
+        x = self.vx
+        y = self.vy
         self.metrics = NavigationMetrics(
             msg.x, msg.y, tolerance_m=GOAL_TOL)
         self.metrics.update(x, y)
@@ -375,11 +376,7 @@ class UnifiedMainNode(Node):
         x, y, yaw = result.pose_est
         self._scan_count += 1
 
-        if self.metrics:
-            self.metrics.update(x, y)
-            if self.metrics.reached:
-                self._on_goal_reached()
-                return
+        
 
         if self.goal and (self._scan_count % REPLAN_EVERY_N == 0):
             now = time.time()
@@ -474,7 +471,9 @@ class UnifiedMainNode(Node):
         # ── Estimate object world position ────────────────────
         # servo_angle is relative to robot forward (90 deg = straight ahead)
         # cx_norm shifts within the camera horizontal FOV
-        robot_x, robot_y, robot_yaw = self.slam.pose
+        robot_x = self.vx
+        robot_y = self.vy
+        robot_yaw = self.vyaw
 
         servo_offset_deg  = servo_angle - 90.0
         cam_offset_deg    = (cx_norm - 0.5) * CAM_HFOV_DEG
@@ -497,6 +496,17 @@ class UnifiedMainNode(Node):
             f"Found '{label}' at ({obj_x:.2f}, {obj_y:.2f})")
 
         # ── Navigate to object ────────────────────────────────
+        cx,cy = self.slam._map.world_to_cell(
+                obj_x,
+                obj_y
+            )
+
+        obs = self.slam._map.inflated_mask()
+
+        if obs[cx,cy]:
+            self.get_logger().warn(
+                "Detected object inside obstacle region"
+            )
         self.goal       = (obj_x, obj_y)
         self.metrics    = NavigationMetrics(
             obj_x, obj_y, tolerance_m=GOAL_TOL)
@@ -540,7 +550,8 @@ class UnifiedMainNode(Node):
         if self.goal is None:
             return
 
-        x, y, _ = self.slam.pose
+        x = self.vx
+        y = self.vy
 
         self.get_logger().info(
             f"[RRT*] Planning to ({self.goal[0]:.2f}, {self.goal[1]:.2f})")
@@ -590,6 +601,12 @@ class UnifiedMainNode(Node):
 
     def _control_loop(self):
         now = self.get_clock().now().to_msg()
+        
+        if self.metrics:
+            self.metrics.update(self.vx, self.vy)
+            if self.metrics.reached:
+                    self._on_goal_reached()
+                    return
 
         if (self.is_moving and self.waypoints
                 and self.wp_index < len(self.waypoints)):
@@ -615,6 +632,12 @@ class UnifiedMainNode(Node):
                 step = min(ROBOT_SPEED_MPS / PUBLISH_HZ, dist)
                 self.vx   += step * math.cos(target_yaw)
                 self.vy   += step * math.sin(target_yaw)
+                # keep SLAM pose synchronized
+                self.slam.pose = (
+                self.vx,
+                self.vy,
+                self.vyaw
+                        )
                 self.vyaw  = target_yaw
                 self._latest_action = "forward"
 
@@ -661,7 +684,9 @@ class UnifiedMainNode(Node):
         else:
             self.task_state = TaskState.DONE
             self._publish_status("Goal reached.")
-
+        empty_path = Path()
+        empty_path.header.frame_id="map"
+        self.path_pub.publish(empty_path)
         self.metrics        = None
         self.goal           = None
         self.waypoints      = []

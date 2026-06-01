@@ -62,6 +62,7 @@ from tf2_ros import TransformBroadcaster
 MAX_ITERATIONS   = 5000    # max RRT iterations before giving up
 STEP_SIZE        = 0.30    # metres per RRT extension step
 GOAL_BIAS        = 0.30    # probability of sampling goal directly
+CORRIDOR_FACTOR = 0.4   # width of corridor-focused sampling region (as fraction of start-goal distance)
 GOAL_TOLERANCE   = 0.30    # metres — goal reached threshold
 INFLATION_M      = 0.20    # obstacle inflation radius (robot radius)
 USE_RRT_STAR     = True    # True = RRT* (rewiring for shorter paths)
@@ -71,6 +72,17 @@ RRT_STAR_RADIUS  = 1.0     # rewiring search radius for RRT*
 MAP_WIDTH_M      = 20.0
 MAP_HEIGHT_M     = 20.0
 MAP_RESOLUTION   = 0.05
+
+# ==========================
+# HMA-RRT* Parameters
+# ==========================
+CORRIDOR_FACTOR      = 0.4
+MIN_CORRIDOR_WIDTH   = 2.0
+GOAL_REGION_RADIUS   = 1.5
+
+CORRIDOR_SAMPLE_RATE = 0.80
+GOAL_SAMPLE_RATE     = 0.15
+RANDOM_SAMPLE_RATE   = 0.05
 
 # Virtual movement
 ROBOT_SPEED_MPS      = 0.3
@@ -352,13 +364,118 @@ class QuadRRTPlanner:
         self.quadtree = None
         self.latest_nodes = []
         print("[INFO] QuadRRTPlanner initialized")
+        self.goal_samples = 0
+        self.corridor_samples = 0
+        self.global_samples = 0
     # ── public API ─────────────────────────────────────────────
+
+    def adaptive_sample(
+        self,
+        sx, sy,
+        gx, gy,
+        wx_min, wx_max,
+        wy_min, wy_max
+    ):
+        """
+        HMA-RRT* Dynamic Region-Based Sampling
+
+        Samples mostly inside a corridor between
+        start and goal.
+        """
+
+        r = random.random()
+
+        # ===================================================
+        # Goal Region Sampling
+        # ===================================================
+        if r < GOAL_SAMPLE_RATE:
+
+            theta = random.uniform(
+                0.0,
+                2.0 * math.pi
+            )
+
+            radius = random.uniform(
+                0.0,
+                GOAL_REGION_RADIUS
+            )
+
+            return (
+                gx + radius * math.cos(theta),
+                gy + radius * math.sin(theta)
+            )
+
+        # ===================================================
+        # Corridor Sampling
+        # ===================================================
+        elif r < GOAL_SAMPLE_RATE + CORRIDOR_SAMPLE_RATE:
+
+            dx = gx - sx
+            dy = gy - sy
+
+            dist = math.hypot(dx, dy)
+
+            corridor_width = max(
+                MIN_CORRIDOR_WIDTH,
+                dist * CORRIDOR_FACTOR
+            )
+
+            t = random.random()
+
+            base_x = sx + t * dx
+            base_y = sy + t * dy
+
+            if dist > 0.001:
+
+                nx = -dy / dist
+                ny = dx / dist
+
+                offset = random.uniform(
+                    -corridor_width / 2.0,
+                    corridor_width / 2.0
+                )
+
+                sample_x = base_x + offset * nx
+                sample_y = base_y + offset * ny
+
+            else:
+
+                sample_x = sx
+                sample_y = sy
+
+            sample_x = max(
+                wx_min,
+                min(sample_x, wx_max)
+            )
+
+            sample_y = max(
+                wy_min,
+                min(sample_y, wy_max)
+            )
+
+            return sample_x, sample_y
+
+        # ===================================================
+        # Global Random Sampling
+        # ===================================================
+        else:
+
+            return (
+                random.uniform(wx_min, wx_max),
+                random.uniform(wy_min, wy_max)
+            )
+
+
+
 
     def plan(self, start_world, goal_world):
         """
         Run RRT (or RRT* if USE_RRT_STAR=True).
         Returns list of (x, y) world-coord waypoints, or [] on failure.
         """
+        self.goal_samples = 0
+        self.corridor_samples = 0
+        self.global_samples = 0
         obs = self.map.inflated_mask()
 
         start_time = time.time()
@@ -410,8 +527,17 @@ class QuadRRTPlanner:
             if random.random() < GOAL_BIAS:
                 rx, ry = gx, gy
             else:
-                rx = random.uniform(wx_min, wx_max)
-                ry = random.uniform(wy_min, wy_max)
+                 rx, ry = self._adaptive_sample(
+                        sx,
+                        sy,
+                        gx,
+                        gy,
+                        wx_min,
+                        wx_max,
+                        wy_min,
+                        wy_max,
+                        len(nodes)
+                    )
 
             # Nearest node
             nearest_idx = self.quadtree.nearest(rx, ry)[1]
@@ -464,6 +590,13 @@ class QuadRRTPlanner:
         elapsed = time.time() - start_time
         print(f"[RRT*] Time: {elapsed:.3f}s | Nodes: {len(nodes)}")
 
+        print(
+            f"[Sampling Stats] "
+            f"Goal={self.goal_samples}, "
+            f"Corridor={self.corridor_samples}, "
+            f"Global={self.global_samples}"
+        )
+
         return path
 
     def get_tree_edges(self, nodes):
@@ -488,6 +621,61 @@ class QuadRRTPlanner:
             return tx, ty
         ratio = STEP_SIZE / d
         return fx + ratio * (tx - fx), fy + ratio * (ty - fy)
+
+
+    def _adaptive_sample(
+        self,
+        sx,
+        sy,
+        gx,
+        gy,
+        wx_min,
+        wx_max,
+        wy_min,
+        wy_max,
+        iteration
+        ):
+        """
+        HMA Dynamic Region-Based Sampling
+        """
+
+        # Early exploration
+        if iteration < MAX_ITERATIONS * 0.3:
+
+            return (
+                random.uniform(wx_min, wx_max),
+                random.uniform(wy_min, wy_max)
+            )
+
+    # Corridor-focused exploration
+
+        mx = (sx + gx) / 2.0
+        my = (sy + gy) / 2.0
+
+        dx = gx - sx
+        dy = gy - sy
+
+        dist = math.hypot(dx, dy)
+
+        corridor_width = max(
+            2.0,
+            dist * 0.4
+        )
+
+        rx = random.uniform(
+            mx - dist / 2,
+            mx + dist / 2
+        )
+
+        ry = random.uniform(
+            my - corridor_width,
+            my + corridor_width
+        )
+        self.goal_samples += 1
+        self.corridor_samples += 1
+        self.global_samples += 1
+
+        return rx, ry        
 
     def _collision_free(self, x0, y0, x1, y1, obs):
         """Check line segment for collisions using Bresenham."""
