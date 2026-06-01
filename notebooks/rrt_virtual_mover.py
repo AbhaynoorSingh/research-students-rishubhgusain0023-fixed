@@ -61,9 +61,9 @@ from tf2_ros import TransformBroadcaster
 # RRT parameters
 MAX_ITERATIONS   = 5000    # max RRT iterations before giving up
 STEP_SIZE        = 0.30    # metres per RRT extension step
-GOAL_BIAS        = 0.30    # probability of sampling goal directly
+GOAL_BIAS        = 0.0   # probability of sampling goal directly
 CORRIDOR_FACTOR = 0.4   # width of corridor-focused sampling region (as fraction of start-goal distance)
-GOAL_TOLERANCE   = 0.30    # metres — goal reached threshold
+GOAL_TOLERANCE   = 0.5    # metres — goal reached threshold
 INFLATION_M      = 0.20    # obstacle inflation radius (robot radius)
 USE_RRT_STAR     = True    # True = RRT* (rewiring for shorter paths)
 RRT_STAR_RADIUS  = 1.0     # rewiring search radius for RRT*
@@ -399,6 +399,7 @@ class QuadRRTPlanner:
                 0.0,
                 GOAL_REGION_RADIUS
             )
+            self.goal_samples += 1
 
             return (
                 gx + radius * math.cos(theta),
@@ -452,6 +453,7 @@ class QuadRRTPlanner:
                 wy_min,
                 min(sample_y, wy_max)
             )
+            self.corridor_samples += 1
 
             return sample_x, sample_y
 
@@ -459,7 +461,7 @@ class QuadRRTPlanner:
         # Global Random Sampling
         # ===================================================
         else:
-
+            self.global_samples += 1
             return (
                 random.uniform(wx_min, wx_max),
                 random.uniform(wy_min, wy_max)
@@ -527,7 +529,7 @@ class QuadRRTPlanner:
             if random.random() < GOAL_BIAS:
                 rx, ry = gx, gy
             else:
-                 rx, ry = self._adaptive_sample(
+                 rx, ry = self.adaptive_sample(
                         sx,
                         sy,
                         gx,
@@ -622,60 +624,7 @@ class QuadRRTPlanner:
         ratio = STEP_SIZE / d
         return fx + ratio * (tx - fx), fy + ratio * (ty - fy)
 
-
-    def _adaptive_sample(
-        self,
-        sx,
-        sy,
-        gx,
-        gy,
-        wx_min,
-        wx_max,
-        wy_min,
-        wy_max,
-        iteration
-        ):
-        """
-        HMA Dynamic Region-Based Sampling
-        """
-
-        # Early exploration
-        if iteration < MAX_ITERATIONS * 0.3:
-
-            return (
-                random.uniform(wx_min, wx_max),
-                random.uniform(wy_min, wy_max)
-            )
-
-    # Corridor-focused exploration
-
-        mx = (sx + gx) / 2.0
-        my = (sy + gy) / 2.0
-
-        dx = gx - sx
-        dy = gy - sy
-
-        dist = math.hypot(dx, dy)
-
-        corridor_width = max(
-            2.0,
-            dist * 0.4
-        )
-
-        rx = random.uniform(
-            mx - dist / 2,
-            mx + dist / 2
-        )
-
-        ry = random.uniform(
-            my - corridor_width,
-            my + corridor_width
-        )
-        self.goal_samples += 1
-        self.corridor_samples += 1
-        self.global_samples += 1
-
-        return rx, ry        
+      
 
     def _collision_free(self, x0, y0, x1, y1, obs):
         """Check line segment for collisions using Bresenham."""
@@ -920,7 +869,7 @@ class RRTVirtualMoverNode(Node):
                 "Try a closer goal or check for obstacles.")
             return
 
-        self.waypoints = self.planner.smooth_path(path)
+        self.waypoints = path
         self.wp_index  = 1
         self.is_moving = True
 

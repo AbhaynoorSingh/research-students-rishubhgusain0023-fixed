@@ -563,7 +563,7 @@ class UnifiedMainNode(Node):
             self.waypoints      = path
             self.wp_index       = 1
             self.is_moving      = True
-            self.active_planner = "rrt"
+            self.active_planner = "Quad-rrt"
             self.get_logger().info(
                 f"[RRT*] Found in {dt:.3f}s | "
                 f"{len(self.waypoints)} waypoints | "
@@ -632,13 +632,17 @@ class UnifiedMainNode(Node):
                 step = min(ROBOT_SPEED_MPS / PUBLISH_HZ, dist)
                 self.vx   += step * math.cos(target_yaw)
                 self.vy   += step * math.sin(target_yaw)
+                self.vyaw  = target_yaw
+                if self.metrics:
+                    self.metrics.update(self.vx, self.vy)
+
                 # keep SLAM pose synchronized
                 self.slam.pose = (
                 self.vx,
                 self.vy,
                 self.vyaw
                         )
-                self.vyaw  = target_yaw
+
                 self._latest_action = "forward"
 
                 twist = Twist()
@@ -674,6 +678,7 @@ class UnifiedMainNode(Node):
         )
 
         if self.metrics:
+            self.metrics.reached = True
             self.metrics.report()
 
         # If task-driven → run arm interaction
