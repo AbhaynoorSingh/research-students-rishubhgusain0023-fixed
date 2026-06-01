@@ -367,6 +367,7 @@ class QuadRRTPlanner:
         self.goal_samples = 0
         self.corridor_samples = 0
         self.global_samples = 0
+        self.rewire_count = 0
     # ── public API ─────────────────────────────────────────────
 
     def adaptive_sample(
@@ -467,7 +468,19 @@ class QuadRRTPlanner:
                 random.uniform(wy_min, wy_max)
             )
 
+    def path_length(self, path):
+        if len(path) < 2:
+            return 0.0
 
+        total = 0.0
+
+        for i in range(len(path)-1):
+            total += math.hypot(
+                path[i+1][0] - path[i][0],
+                path[i+1][1] - path[i][1]
+            )
+
+        return total
 
 
     def plan(self, start_world, goal_world):
@@ -582,6 +595,8 @@ class QuadRRTPlanner:
         if goal_node_idx is None:
             return []
 
+        raw_length = self.path_length(path)
+
         path = self._extract_path(nodes, goal_node_idx)
         # Step 1: averaging smooth
         path = self.smooth_path(path)
@@ -590,6 +605,7 @@ class QuadRRTPlanner:
         path = self.shortcut_smooth(path)
         self.latest_nodes = nodes
         elapsed = time.time() - start_time
+        smooth_length = self.path_length(path)
         print(f"[RRT*] Time: {elapsed:.3f}s | Nodes: {len(nodes)}")
 
         print(
@@ -598,6 +614,11 @@ class QuadRRTPlanner:
             f"Corridor={self.corridor_samples}, "
             f"Global={self.global_samples}"
         )
+        print(
+        f"[Optimization] "
+        f"{raw_length:.2f}m -> {smooth_length:.2f}m"
+        )
+        print(f"[RRT*] Rewires: {self.rewire_count}")
 
         return path
 
@@ -688,6 +709,7 @@ class QuadRRTPlanner:
                self._collision_free(new_node.x, new_node.y,
                                     node.x, node.y, obs):
                 node.parent = new_idx
+                self.rewire_count += 1
                 node.cost   = new_cost
                 self._update_children_costs(nodes, i)
 

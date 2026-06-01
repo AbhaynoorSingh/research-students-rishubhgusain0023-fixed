@@ -568,6 +568,7 @@ class UnifiedMainNode(Node):
                 f"[RRT*] Found in {dt:.3f}s | "
                 f"{len(self.waypoints)} waypoints | "
                 f"{self._path_length():.2f}m")
+           
         else:
             self.get_logger().warn(
                 f"[RRT*] Failed ({dt:.3f}s) — falling back to A*")
