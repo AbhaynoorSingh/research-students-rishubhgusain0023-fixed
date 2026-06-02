@@ -32,6 +32,7 @@ import os
 import sys
 import time
 import numpy as np
+import matplotlib.pyplot as plt
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import (QoSProfile, QoSReliabilityPolicy,
@@ -129,6 +130,7 @@ def quat_from_yaw(yaw: float) -> Quaternion:
 class TaskState:
     IDLE        = "idle"
     SCANNING    = "scanning"
+    PLANNING    = "planning"
     NAVIGATING  = "navigating"
     INTERACTING = "interacting"
     DONE        = "done"
@@ -178,6 +180,11 @@ class UnifiedMainNode(Node):
             resolution = 0.05,
         )
         self.slam.reset()
+        
+        # ---stuck detection variables-------------------------
+        self.last_progress_time = time.time()
+        self.last_progress_x = 0.0
+        self.last_progress_y = 0.0
 
         # ── Planners ─────────────────────────────────────────
         self.rrt_planner   = RRTPlanner(self.slam._map)
@@ -563,6 +570,8 @@ class UnifiedMainNode(Node):
     # ══════════════════════════════════════════════════════════
 
     def _replan(self):
+        self.task_state = TaskState.PLANNING
+        
         if self.goal is None:
             return
 
@@ -575,10 +584,12 @@ class UnifiedMainNode(Node):
         dt   = time.time() - t0
 
         if path:
-            self.waypoints      = self.rrt_planner.smooth_path(path)
+            self.task_state = TaskState.NAVIGATING
+            self.waypoints      = path
             self.wp_index       = 1
             self.is_moving      = True
             self.active_planner = "rrt"
+            self.visualize_navigation()
             self.get_logger().info(
                 f"[RRT*] Found in {dt:.3f}s | "
                 f"{len(self.waypoints)} waypoints | "
@@ -591,14 +602,17 @@ class UnifiedMainNode(Node):
                 (x, y), self.goal, rx, ry)
 
             if raw_path:
-                self.waypoints      = self.astar_planner.smooth_path(raw_path)
+                self.task_state     = TaskState.NAVIGATING
+                self.waypoints      = raw_path
                 self.wp_index       = 1
                 self.is_moving      = True
                 self.active_planner = "astar"
+                self.visualize_navigation()
                 self.get_logger().info(
-                    f"[A*] Fallback | "
-                    f"{len(self.waypoints)} waypoints | "
-                    f"{self._path_length():.2f}m")
+                    f"[RRT*] Found in {dt:.3f}s | "
+                    f"Waypoints: {len(self.waypoints)} | "
+                    f"Path Length: {self._path_length():.2f}m"
+                )
             else:
                 self.get_logger().error(
                     "Both RRT* and A* failed. Cannot navigate.")
@@ -840,6 +854,84 @@ class UnifiedMainNode(Node):
         pts = np.array(self.waypoints)
         return float(np.sum(
             np.linalg.norm(np.diff(pts, axis=0), axis=1)))
+        
+    
+    # Visualization through a graph    
+    def visualize_navigation(self):
+
+        if not self.waypoints:
+            return
+    
+        plt.figure(figsize=(10, 10))
+    
+        grid = self.slam._map.log_odds > 2.0
+    
+        extent = [
+            self.slam._map.origin_x,
+            self.slam._map.origin_x +
+            (self.slam._map.w * self.slam._map.res),
+            self.slam._map.origin_y,
+            self.slam._map.origin_y +
+            (self.slam._map.h * self.slam._map.res)
+        ]
+    
+        plt.imshow(
+            grid.T.astype(float),
+            origin='lower',
+            cmap='gray_r',
+            interpolation='nearest',
+            extent=extent
+        )
+        
+        # waypoint markers
+        for i, (wx, wy) in enumerate(self.waypoints):
+            plt.plot(wx, wy, 'ro')
+            plt.text(wx, wy, str(i))
+    
+        # Robot
+        plt.plot(
+            self.vx,
+            self.vy,
+            'bo',
+            markersize=10,
+            label='Robot'
+        )
+    
+        # Goal
+        if self.goal:
+            plt.plot(
+                self.goal[0],
+                self.goal[1],
+                'rx',
+                markersize=12,
+                label='Goal'
+            )
+    
+        # Path
+        px = []
+        py = []
+    
+        for wx, wy in self.waypoints:
+            px.append(wx)
+            py.append(wy)
+    
+        plt.plot(
+            px,
+            py,
+            'g-',
+            linewidth=2,
+            label='Path'
+        )
+    
+        plt.xlabel("X (m)")
+        plt.ylabel("Y (m)")
+        plt.title(
+            f"{self.active_planner.upper()} Navigation"
+        )
+        plt.legend()
+        plt.grid(True)
+    
+        plt.show()
 
     # ══════════════════════════════════════════════════════════
     #  Cleanup

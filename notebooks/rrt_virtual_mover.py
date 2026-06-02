@@ -277,10 +277,10 @@ class RRTPlanner:
 
         path = self._extract_path(nodes, goal_node_idx)
         # Step 1: averaging smooth
-        path = self.smooth_path(path)
+        #path = self.smooth_path(path)
 
         # Step 2: shortcut smooth (NEW)
-        path = self.shortcut_smooth(path)
+        #path = self.shortcut_smooth(path)
         elapsed = time.time() - start_time
         print(f"[RRT*] Time: {elapsed:.3f}s | Nodes: {len(nodes)}")
 
@@ -517,7 +517,7 @@ class RRTVirtualMoverNode(Node):
                 "Try a closer goal or check for obstacles.")
             return
 
-        self.waypoints = self.planner.smooth_path(path)
+        self.waypoints = path
         self.wp_index  = 1
         self.is_moving = True
 
