@@ -568,7 +568,18 @@ class UnifiedMainNode(Node):
                 f"[RRT*] Found in {dt:.3f}s | "
                 f"{len(self.waypoints)} waypoints | "
                 f"{self._path_length():.2f}m")
-           
+
+            # ── Bug 7 fix: log sampling stats right after planning ──
+            self.get_logger().info(
+                f"[HMA] Samples → "
+                f"Goal: {self.rrt_planner.goal_samples}  "
+                f"Corridor: {self.rrt_planner.corridor_samples}  "
+                f"Global: {self.rrt_planner.global_samples}  "
+                f"| Rewires: {self.rrt_planner.rewire_count}  "
+                f"| Raw: {self.rrt_planner.raw_path_length:.2f}m → "
+                f"Smooth: {self.rrt_planner.smoothed_path_length:.2f}m"
+            )
+
         else:
             self.get_logger().warn(
                 f"[RRT*] Failed ({dt:.3f}s) — falling back to A*")
@@ -604,7 +615,7 @@ class UnifiedMainNode(Node):
         now = self.get_clock().now().to_msg()
         
        
-        if self.metrics.reached:
+        if self.metrics and self.metrics.reached:
                     self._on_goal_reached()
                     return
 
@@ -663,46 +674,55 @@ class UnifiedMainNode(Node):
         self.cmdvel_pub.publish(Twist())
 
         goal   = self.waypoints[-1] if self.waypoints else self.goal
-        length = self._path_length()
 
+        # ── Bug 7 fix: read HMA metrics from planner attributes ──
+        m = {
+            "time":             self.rrt_planner.plan_time,
+            "nodes":            self.rrt_planner.total_nodes,
+            "rewires":          self.rrt_planner.rewire_count,
+            "goal_samples":     self.rrt_planner.goal_samples,
+            "corridor_samples": self.rrt_planner.corridor_samples,
+            "global_samples":   self.rrt_planner.global_samples,
+            "raw_length":       self.rrt_planner.raw_path_length,
+            "smooth_length":    self.rrt_planner.smoothed_path_length,
+        }
+
+        # ── Bug 4 fix: use self.vx/self.vy, not self.x ──
         self.get_logger().info(
-        f"\n{'='*70}\n"
-        f"           HMA-RRT* NAVIGATION REPORT\n"
-        f"{'='*70}\n"
+            f"\n{'='*70}\n"
+            f"           HMA-RRT* NAVIGATION REPORT\n"
+            f"{'='*70}\n"
 
-        f"Goal Position       : ({goal[0]:.2f}, {goal[1]:.2f})\n"
-        f"Final Position      : ({self.x:.3f}, {self.y:.3f})\n"
+            f"Goal Position       : ({goal[0]:.2f}, {goal[1]:.2f})\n"
+            f"Final Position      : ({self.vx:.3f}, {self.vy:.3f})\n"
 
-        f"\n----- Planning Metrics -----\n"
+            f"\n----- Planning Metrics -----\n"
+            f"Planning Time       : {m['time']:.3f} s\n"
+            f"Tree Nodes          : {m['nodes']}\n"
+            f"Rewire Operations   : {m['rewires']}\n"
 
-        f"Planning Time       : {m['time']:.3f} s\n"
-        f"Tree Nodes          : {m['nodes']}\n"
-        f"Rewire Operations   : {m['rewires']}\n"
+            f"\n----- Sampling Statistics -----\n"
+            f"Goal Samples        : {m['goal_samples']}\n"
+            f"Corridor Samples    : {m['corridor_samples']}\n"
+            f"Global Samples      : {m['global_samples']}\n"
 
-        f"\n----- Sampling Statistics -----\n"
+            f"\n----- Path Optimization -----\n"
+            f"Raw Path Length     : {m['raw_length']:.2f} m\n"
+            f"Smoothed Length     : {m['smooth_length']:.2f} m\n"
 
-        f"Goal Samples        : {m['goal_samples']}\n"
-        f"Corridor Samples    : {m['corridor_samples']}\n"
-        f"Global Samples      : {m['global_samples']}\n"
+            f"\n----- Execution -----\n"
+            f"Final Path Length   : {self._path_length():.2f} m\n"
+            f"Waypoints           : {len(self.waypoints)}\n"
 
-        f"\n----- Path Optimization -----\n"
-
-        f"Raw Path Length     : {m['raw_length']:.2f} m\n"
-        f"Smoothed Length     : {m['smooth_length']:.2f} m\n"
-
-        f"\n----- Execution -----\n"
-
-        f"Final Path Length   : {self._path_length():.2f} m\n"
-        f"Waypoints           : {len(self.waypoints)}\n"
-
-        f"{'='*70}"
+            f"{'='*70}"
         )
-        
+
+        # ── Bug 4 fix: set reached=True BEFORE calling report() ──
         if self.metrics:
             self.metrics.reached = True
             self.metrics.report()
 
-        # If task-driven → run arm interaction
+        # Task-driven → run arm interaction
         if self.task_state == TaskState.NAVIGATING and self.current_task:
             self.task_state = TaskState.INTERACTING
             self._publish_status("Arrived — interacting with object...")
@@ -710,8 +730,9 @@ class UnifiedMainNode(Node):
         else:
             self.task_state = TaskState.DONE
             self._publish_status("Goal reached.")
+
         empty_path = Path()
-        empty_path.header.frame_id="map"
+        empty_path.header.frame_id = "map"
         self.path_pub.publish(empty_path)
         self.metrics        = None
         self.goal           = None

@@ -58,36 +58,33 @@ from tf2_ros import TransformBroadcaster
 
 
 # ───────────────────────── CONFIG ─────────────────────────────
+# ───────────────────────── CONFIG ─────────────────────────────
 # RRT parameters
-MAX_ITERATIONS   = 5000    # max RRT iterations before giving up
-STEP_SIZE        = 0.30    # metres per RRT extension step
-GOAL_BIAS        = 0.10  # probability of sampling goal directly
-CORRIDOR_FACTOR = 0.4   # width of corridor-focused sampling region (as fraction of start-goal distance)
-GOAL_TOLERANCE   = 0.5    # metres — goal reached threshold
-INFLATION_M      = 0.20    # obstacle inflation radius (robot radius)
-USE_RRT_STAR     = True    # True = RRT* (rewiring for shorter paths)
-RRT_STAR_RADIUS  = 1.0     # rewiring search radius for RRT*
+MAX_ITERATIONS   = 5000
+STEP_SIZE        = 0.30
+GOAL_BIAS        = 0.10    # kept only as fallback — see Bug 6 note
+GOAL_TOLERANCE   = 0.5
+INFLATION_M      = 0.20
+USE_RRT_STAR     = True
+RRT_STAR_RADIUS  = 1.0
 
-# Map parameters (must match lidar_slam_planner.py)
+# Map parameters
 MAP_WIDTH_M      = 20.0
 MAP_HEIGHT_M     = 20.0
 MAP_RESOLUTION   = 0.05
 
-# ==========================
-# HMA-RRT* Parameters
-# ==========================
+# HMA-RRT* parameters  ← single authoritative block
 CORRIDOR_FACTOR      = 0.4
 MIN_CORRIDOR_WIDTH   = 2.0
 GOAL_REGION_RADIUS   = 1.5
-
 CORRIDOR_SAMPLE_RATE = 0.80
 GOAL_SAMPLE_RATE     = 0.15
 RANDOM_SAMPLE_RATE   = 0.05
 
 # Virtual movement
-ROBOT_SPEED_MPS      = 0.3
-WAYPOINT_TOLERANCE   = 0.10
-PUBLISH_HZ           = 20.0
+ROBOT_SPEED_MPS  = 0.3
+WAYPOINT_TOLERANCE = 0.10
+PUBLISH_HZ       = 20.0
 # ──────────────────────────────────────────────────────────────
 
 
@@ -557,10 +554,8 @@ class QuadRRTPlanner:
 
         for _ in range(MAX_ITERATIONS):
             # Sample
-            if random.random() < GOAL_BIAS:
-                rx, ry = gx, gy
-            else:
-                 rx, ry = self.adaptive_sample(
+            
+            rx, ry = self.adaptive_sample(
                         sx,
                         sy,
                         gx,
