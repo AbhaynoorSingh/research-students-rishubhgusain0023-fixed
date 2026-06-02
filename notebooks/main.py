@@ -648,11 +648,10 @@ class UnifiedMainNode(Node):
                     self.metrics.update(self.vx, self.vy)
 
                 # keep SLAM pose synchronized
-                self.slam.pose = (
-                self.vx,
-                self.vy,
-                self.vyaw
-                        )
+                # keep SLAM pose synchronized
+                self.slam._pose.x   = self.vx
+                self.slam._pose.y   = self.vy
+                self.slam._pose.yaw = self.vyaw
 
                 self._latest_action = "forward"
 
