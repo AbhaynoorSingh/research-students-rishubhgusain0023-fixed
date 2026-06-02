@@ -603,9 +603,8 @@ class UnifiedMainNode(Node):
     def _control_loop(self):
         now = self.get_clock().now().to_msg()
         
-        if self.metrics:
-            self.metrics.update(self.vx, self.vy)
-            if self.metrics.reached:
+       
+        if self.metrics.reached:
                     self._on_goal_reached()
                     return
 
@@ -667,17 +666,38 @@ class UnifiedMainNode(Node):
         length = self._path_length()
 
         self.get_logger().info(
-            f"\n{'='*55}\n"
-            f"  GOAL REACHED via {self.active_planner.upper()}\n"
-            f"  Goal        : ({goal[0]:.2f}, {goal[1]:.2f})\n"
-            f"  Virtual pos : ({self.vx:.3f}, {self.vy:.3f})\n"
-            f"  Path length : {length:.2f} m\n"
-            f"  Waypoints   : {len(self.waypoints)}\n"
-            f"  Explored    : {self.slam.explored_ratio*100:.1f}%\n"
-            f"  SLAM steps  : {self.slam.step}\n"
-            f"{'='*55}"
-        )
+        f"\n{'='*70}\n"
+        f"           HMA-RRT* NAVIGATION REPORT\n"
+        f"{'='*70}\n"
 
+        f"Goal Position       : ({goal[0]:.2f}, {goal[1]:.2f})\n"
+        f"Final Position      : ({self.x:.3f}, {self.y:.3f})\n"
+
+        f"\n----- Planning Metrics -----\n"
+
+        f"Planning Time       : {m['time']:.3f} s\n"
+        f"Tree Nodes          : {m['nodes']}\n"
+        f"Rewire Operations   : {m['rewires']}\n"
+
+        f"\n----- Sampling Statistics -----\n"
+
+        f"Goal Samples        : {m['goal_samples']}\n"
+        f"Corridor Samples    : {m['corridor_samples']}\n"
+        f"Global Samples      : {m['global_samples']}\n"
+
+        f"\n----- Path Optimization -----\n"
+
+        f"Raw Path Length     : {m['raw_length']:.2f} m\n"
+        f"Smoothed Length     : {m['smooth_length']:.2f} m\n"
+
+        f"\n----- Execution -----\n"
+
+        f"Final Path Length   : {self._path_length():.2f} m\n"
+        f"Waypoints           : {len(self.waypoints)}\n"
+
+        f"{'='*70}"
+        )
+        
         if self.metrics:
             self.metrics.reached = True
             self.metrics.report()

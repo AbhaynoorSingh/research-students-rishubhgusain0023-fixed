@@ -61,7 +61,7 @@ from tf2_ros import TransformBroadcaster
 # RRT parameters
 MAX_ITERATIONS   = 5000    # max RRT iterations before giving up
 STEP_SIZE        = 0.30    # metres per RRT extension step
-GOAL_BIAS        = 0.0   # probability of sampling goal directly
+GOAL_BIAS        = 0.10  # probability of sampling goal directly
 CORRIDOR_FACTOR = 0.4   # width of corridor-focused sampling region (as fraction of start-goal distance)
 GOAL_TOLERANCE   = 0.5    # metres — goal reached threshold
 INFLATION_M      = 0.20    # obstacle inflation radius (robot radius)
@@ -364,19 +364,28 @@ class QuadRRTPlanner:
         self.quadtree = None
         self.latest_nodes = []
         print("[INFO] QuadRRTPlanner initialized")
+        # HMA-RRT* metrics
+        self.plan_time = 0.0
+        self.total_nodes = 0
+
+        self.raw_path_length = 0.0
+        self.smoothed_path_length = 0.0
+
         self.goal_samples = 0
         self.corridor_samples = 0
         self.global_samples = 0
+
         self.rewire_count = 0
     # ── public API ─────────────────────────────────────────────
 
     def adaptive_sample(
-        self,
+            self,
         sx, sy,
         gx, gy,
         wx_min, wx_max,
-        wy_min, wy_max
-    ):
+        wy_min, wy_max,
+        nodes
+        ):
         """
         HMA-RRT* Dynamic Region-Based Sampling
 
@@ -491,6 +500,15 @@ class QuadRRTPlanner:
         self.goal_samples = 0
         self.corridor_samples = 0
         self.global_samples = 0
+
+        self.rewire_count = 0
+
+        self.plan_time = 0.0
+        self.total_nodes = 0
+
+        self.raw_path_length = 0.0
+        self.smoothed_path_length = 0.0       
+
         obs = self.map.inflated_mask()
 
         start_time = time.time()
@@ -595,9 +613,9 @@ class QuadRRTPlanner:
         if goal_node_idx is None:
             return []
 
-        raw_length = self.path_length(path)
 
         path = self._extract_path(nodes, goal_node_idx)
+        raw_length = self.path_length(path)
         # Step 1: averaging smooth
         path = self.smooth_path(path)
 
@@ -606,6 +624,11 @@ class QuadRRTPlanner:
         self.latest_nodes = nodes
         elapsed = time.time() - start_time
         smooth_length = self.path_length(path)
+        self.plan_time = elapsed
+        self.total_nodes = len(nodes)
+
+        self.raw_path_length = raw_length
+        self.smoothed_path_length = smooth_length
         print(f"[RRT*] Time: {elapsed:.3f}s | Nodes: {len(nodes)}")
 
         print(
@@ -881,6 +904,19 @@ class RRTVirtualMoverNode(Node):
 
         t0 = time.time()
         path = self.planner.plan((self.x, self.y), goal)
+        self.plan_metrics = {
+        "time": self.planner.plan_time,
+        "nodes": self.planner.total_nodes,
+
+        "raw_length": self.planner.raw_path_length,
+        "smooth_length": self.planner.smoothed_path_length,
+
+        "goal_samples": self.planner.goal_samples,
+        "corridor_samples": self.planner.corridor_samples,
+        "global_samples": self.planner.global_samples,
+
+        "rewires": self.planner.rewire_count
+        }
         self.rrt_nodes = self.planner.latest_nodes
         elapsed = time.time() - t0
 
