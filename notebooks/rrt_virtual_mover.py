@@ -62,7 +62,7 @@ from tf2_ros import TransformBroadcaster
 # RRT parameters
 MAX_ITERATIONS   = 5000
 STEP_SIZE        = 0.30
-GOAL_BIAS        = 0.10    # kept only as fallback — see Bug 6 note
+GOAL_BIAS        = 0.10    # kept only as fallback
 GOAL_TOLERANCE   = 0.5
 INFLATION_M      = 0.20
 USE_RRT_STAR     = True
@@ -80,6 +80,12 @@ GOAL_REGION_RADIUS   = 1.5
 CORRIDOR_SAMPLE_RATE = 0.80
 GOAL_SAMPLE_RATE     = 0.15
 RANDOM_SAMPLE_RATE   = 0.05
+
+
+# Grid-based sampling (Component 1 upgrade — Section 3.1)
+GRID_N           = 10      # 10×10 grid over entire map
+GRID_DELTA       = 0.1     # attenuation factor for selection count
+GRID_P_BASE      = 0.05    # base probability every cell starts with
 
 # Virtual movement
 ROBOT_SPEED_MPS  = 0.3
@@ -373,6 +379,183 @@ class QuadRRTPlanner:
         self.global_samples = 0
 
         self.rewire_count = 0
+        # Grid sampling state — reset each plan() call
+        self.grid_probs  = {}   # normalized probability per (i,j) cell
+        self.grid_counts = {}   # how many times each cell has been sampled
+        self.grid_nc     = 0    # obstacle count intersecting start-goal line
+
+
+
+
+    # ══════════════════════════════════════════════════════
+#  Component 1 — Grid-Based Dynamic Sampling (Paper §3.1)
+# ══════════════════════════════════════════════════════
+
+    def _point_to_line_dist(self, px, py, x1, y1, x2, y2):
+        """
+        Perpendicular distance from point (px,py) to the
+        finite line segment (x1,y1)→(x2,y2).
+        Used in Equation 9 to compute d_ij for every grid cell.
+        """
+        dx = x2 - x1
+        dy = y2 - y1
+        if dx == 0 and dy == 0:
+            return math.hypot(px - x1, py - y1)
+        t = ((px - x1)*dx + (py - y1)*dy) / (dx*dx + dy*dy)
+        t = max(0.0, min(1.0, t))
+        return math.hypot(px - (x1 + t*dx), py - (y1 + t*dy))
+    
+
+    def _obstacle_ratio_in_cell(self, cx, cy, cw, ch, obs_mask):
+        """
+        Fraction of a grid cell covered by obstacle pixels.
+        Returns A_ij used in Equation 11.
+        cx, cy = world-coord bottom-left corner of cell
+        cw, ch = cell width and height in metres
+        """
+        # Convert cell world corners to map pixel indices
+        x0 = int((cx - self.map.origin_x) / self.map.res)
+        y0 = int((cy - self.map.origin_y) / self.map.res)
+        x1 = int((cx + cw - self.map.origin_x) / self.map.res)
+        y1 = int((cy + ch - self.map.origin_y) / self.map.res)
+
+        # Clamp to map bounds
+        x0 = max(0, x0);  y0 = max(0, y0)
+        x1 = min(obs_mask.shape[0] - 1, x1)
+        y1 = min(obs_mask.shape[1] - 1, y1)
+
+        if x1 <= x0 or y1 <= y0:
+            return 0.0
+
+        region = obs_mask[x0:x1, y0:y1]
+        return float(np.sum(region)) / float(region.size + 1e-6)
+
+
+    def _count_line_obstacle_intersections(self, sx, sy, gx, gy, obs_mask):
+        """
+        Count how many distinct obstacle clusters the straight
+        start→goal line passes through.
+        This gives n_c in Equation 7, used to compute σ_k (Eq. 8).
+        """
+        steps = int(math.hypot(gx - sx, gy - sy) / self.map.res)
+        steps = max(steps, 1)
+        prev_hit = False
+        nc = 0
+        for k in range(steps + 1):
+            t  = k / steps
+            wx = sx + t * (gx - sx)
+            wy = sy + t * (gy - sy)
+            cx, cy = self.map.world_to_cell(wx, wy)
+            if self.map.in_bounds(cx, cy) and obs_mask[cx, cy]:
+                if not prev_hit:
+                    nc += 1       # entering a new obstacle cluster
+                prev_hit = True
+            else:
+                prev_hit = False
+        return nc
+    
+    def _init_sampling_grid(self, sx, sy, gx, gy, obs_mask):
+        """
+        Build the full n×n probability table once per plan() call.
+        Implements Equations 7–13 from Section 3.1 of the paper.
+
+        After this call, self.grid_probs[(i,j)] holds the normalized
+        probability of sampling from cell (i,j).
+        self.grid_counts is reset to zero for all cells.
+        """
+        n     = GRID_N
+        ox    = self.map.origin_x          # world x of map left edge
+        oy    = self.map.origin_y          # world y of map bottom edge
+        mw    = self.map.w * self.map.res  # total map width  in metres
+        mh    = self.map.h * self.map.res  # total map height in metres
+        cw    = mw / n                     # single cell width  in metres
+        ch    = mh / n                     # single cell height in metres
+
+        L = math.hypot(gx - sx, gy - sy)  # start-goal line length
+
+        # ── Eq. 7: count obstacle clusters on direct line ──
+        nc    = self._count_line_obstacle_intersections(sx, sy, gx, gy, obs_mask)
+        nmax  = max(1, nc + 1)             # at least 1 to avoid div-by-zero
+
+        # ── Eq. 8: steepness of distance-bias function ──
+        # When nc is large (many obstacles on line), sigma_k → 0
+        # meaning the distance falloff is gentle → samples spread wide
+        # When nc is 0 (clear line), sigma_k = 1 → tight corridor
+        sigma_k = 1.0 - nc / nmax
+
+        raw_probs = {}
+        self.grid_counts = {}
+
+        for i in range(n):
+            for j in range(n):
+                # World coord of this cell's centre
+                cell_cx = ox + (i + 0.5) * cw
+                cell_cy = oy + (j + 0.5) * ch
+
+                # ── Eq. 9: normalised perpendicular distance to line ──
+                d_ij = self._point_to_line_dist(
+                    cell_cx, cell_cy, sx, sy, gx, gy) / (L / 2.0 + 1e-6)
+
+                # ── Eq. 10: distance-bias probability ──
+                # Sigmoid: cells near the line get ~1.0, far cells get ~0.0
+                P_line = 1.0 / (1.0 + math.exp(sigma_k * (d_ij - 1.0)))
+
+                # ── Eq. 11: obstacle-area penalty ──
+                # High obstacle ratio → low probability
+                A_ij  = self._obstacle_ratio_in_cell(
+                    ox + i*cw, oy + j*ch, cw, ch, obs_mask)
+                P_area = math.exp(-A_ij)
+
+                # ── Eq. 12: combined probability (no prior selections yet) ──
+                # C_ij = 0 at start, so e^(-delta*0) = 1 → no attenuation yet
+                C_ij  = 0
+                P_ij  = (GRID_P_BASE + P_line * math.exp(-GRID_DELTA * C_ij)) \
+                        * P_area
+
+                raw_probs[(i, j)]    = max(P_ij, 1e-9)
+                self.grid_counts[(i, j)] = 0
+
+        # ── Eq. 13: normalise so all cells sum to 1.0 ──
+        total = sum(raw_probs.values())
+        self.grid_probs = {k: v / total for k, v in raw_probs.items()}
+
+    def _sample_from_grid(self):
+            """
+            Draw one world-coordinate sample using the probability table.
+            After sampling, the chosen cell's probability is attenuated
+            (Equation 12) so future iterations explore other cells more.
+            """
+            n  = GRID_N
+            ox = self.map.origin_x
+            oy = self.map.origin_y
+            cw = (self.map.w * self.map.res) / n
+            ch = (self.map.h * self.map.res) / n
+
+            # Weighted random cell selection
+            keys   = list(self.grid_probs.keys())
+            weights = [self.grid_probs[k] for k in keys]
+            chosen  = random.choices(keys, weights=weights, k=1)[0]
+            i, j    = chosen
+
+            # Update selection count and re-attenuate this cell (Eq. 12)
+            self.grid_counts[(i, j)] += 1
+            C_ij = self.grid_counts[(i, j)]
+
+            # Recompute raw probability for this cell with new count
+            # (keeping P_line and P_area from init — only count changes)
+            # We attenuate by reducing weight directly for efficiency
+            self.grid_probs[(i, j)] *= math.exp(-GRID_DELTA)
+
+            # Re-normalise only if total drifts too far (lazy normalisation)
+            total = sum(self.grid_probs.values())
+            if total < 0.5:   # renorm threshold
+                self.grid_probs = {k: v/total for k, v in self.grid_probs.items()}
+
+            # Random point uniformly within the chosen cell
+            rx = ox + (i + random.random()) * cw
+            ry = oy + (j + random.random()) * ch
+            return rx, ry
+
     # ── public API ─────────────────────────────────────────────
 
     def adaptive_sample(
@@ -551,21 +734,15 @@ class QuadRRTPlanner:
         QuadTreeNode(sx, sy, 0)
         )
         goal_node_idx = None
+        # ── Component 1: build grid probability table once ──
+        self._init_sampling_grid(sx, sy, gx, gy, obs)
+        self.grid_counts = {}   # ensure fresh counts
 
         for _ in range(MAX_ITERATIONS):
             # Sample
             
-            rx, ry = self.adaptive_sample(
-                        sx,
-                        sy,
-                        gx,
-                        gy,
-                        wx_min,
-                        wx_max,
-                        wy_min,
-                        wy_max,
-                        len(nodes)
-                    )
+           # Sample — Component 1: grid-based dynamic sampling
+            rx, ry = self._sample_from_grid()
 
             # Nearest node
             nearest_idx = self.quadtree.nearest(rx, ry)[1]
