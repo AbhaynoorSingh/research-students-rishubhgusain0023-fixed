@@ -520,53 +520,47 @@ class QuadRRTPlanner:
         self.grid_probs = {k: v / total for k, v in raw_probs.items()}
 
     def _sample_from_grid(self):
-            """
-            Draw one world-coordinate sample using the probability table.
-            After sampling, the chosen cell's probability is attenuated
-            (Equation 12) so future iterations explore other cells more.
-            """
-            n  = GRID_N
-            ox = self.map.origin_x
-            oy = self.map.origin_y
-            cw = (self.map.w * self.map.res) / n
-            ch = (self.map.h * self.map.res) / n
+    # ── Explicit goal bias FIRST (replaces old GOAL_BIAS) ──
+        if random.random() < GOAL_SAMPLE_RATE:   # 15%
+            theta  = random.uniform(0, 2 * math.pi)
+            radius = random.uniform(0, GOAL_REGION_RADIUS)
+            self.goal_samples += 1
+            return (
+                self._plan_gx + radius * math.cos(theta),
+                self._plan_gy + radius * math.sin(theta)
+            )
 
-            # Weighted random cell selection
-            keys   = list(self.grid_probs.keys())
-            weights = [self.grid_probs[k] for k in keys]
-            chosen  = random.choices(keys, weights=weights, k=1)[0]
-            i, j    = chosen
+        # ── Remaining 85% → grid-based sampling ──
+        n  = GRID_N
+        ox = self.map.origin_x
+        oy = self.map.origin_y
+        cw = (self.map.w * self.map.res) / n
+        ch = (self.map.h * self.map.res) / n
 
+        keys    = list(self.grid_probs.keys())
+        weights = [self.grid_probs[k] for k in keys]
+        chosen  = random.choices(keys, weights=weights, k=1)[0]
+        i, j    = chosen
 
-            # Track for HMA report — count by cell zone
-            i, j = chosen
-            # Goal-region cells (top-right quadrant toward goal)
-            if math.hypot(
-                (self.map.origin_x + (i+0.5)*(self.map.w*self.map.res/GRID_N)) - self._plan_gx,
-                (self.map.origin_y + (j+0.5)*(self.map.h*self.map.res/GRID_N)) - self._plan_gy
-            ) <= GOAL_REGION_RADIUS:
-                self.goal_samples += 1
-            else:
-                self.corridor_samples += 1  # everything else counts as corridor
+        self.grid_counts[(i, j)] += 1
+        self.grid_probs[(i, j)]  *= math.exp(-GRID_DELTA)
 
-            # Update selection count and re-attenuate this cell (Eq. 12)
-            self.grid_counts[(i, j)] += 1
-            C_ij = self.grid_counts[(i, j)]
+        total = sum(self.grid_probs.values())
+        if total < 0.5:
+            self.grid_probs = {k: v/total for k, v in self.grid_probs.items()}
 
-            # Recompute raw probability for this cell with new count
-            # (keeping P_line and P_area from init — only count changes)
-            # We attenuate by reducing weight directly for efficiency
-            self.grid_probs[(i, j)] *= math.exp(-GRID_DELTA)
+        # Check if this cell is near goal — count accordingly
+        cell_cx = ox + (i + 0.5) * cw
+        cell_cy = oy + (j + 0.5) * ch
+        if math.hypot(cell_cx - self._plan_gx,
+                    cell_cy - self._plan_gy) <= GOAL_REGION_RADIUS:
+            self.goal_samples += 1
+        else:
+            self.corridor_samples += 1
 
-            # Re-normalise only if total drifts too far (lazy normalisation)
-            total = sum(self.grid_probs.values())
-            if total < 0.5:   # renorm threshold
-                self.grid_probs = {k: v/total for k, v in self.grid_probs.items()}
-
-            # Random point uniformly within the chosen cell
-            rx = ox + (i + random.random()) * cw
-            ry = oy + (j + random.random()) * ch
-            return rx, ry
+        rx = ox + (i + random.random()) * cw
+        ry = oy + (j + random.random()) * ch
+        return rx, ry
 
     # ── public API ─────────────────────────────────────────────
 
@@ -725,7 +719,7 @@ class QuadRRTPlanner:
 
         self._plan_gx = gx
         self._plan_gy = gy  
-        
+
         # Validate start / goal
         scx, scy = self.map.world_to_cell(sx, sy)
         gcx, gcy = self.map.world_to_cell(gx, gy)
