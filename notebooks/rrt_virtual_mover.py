@@ -475,13 +475,13 @@ class QuadRRTPlanner:
 
         # ── Eq. 7: count obstacle clusters on direct line ──
         nc    = self._count_line_obstacle_intersections(sx, sy, gx, gy, obs_mask)
-        nmax  = max(1, nc + 1)             # at least 1 to avoid div-by-zero
+        nmax  = max(1, nc)             # at least 1 to avoid div-by-zero
 
         # ── Eq. 8: steepness of distance-bias function ──
         # When nc is large (many obstacles on line), sigma_k → 0
         # meaning the distance falloff is gentle → samples spread wide
         # When nc is 0 (clear line), sigma_k = 1 → tight corridor
-        sigma_k = 1.0 - nc / nmax
+        sigma_k = 1.0 if nc == 0 else (1.0 - nc / (nmax + 1))
 
         raw_probs = {}
         self.grid_counts = {}
@@ -536,6 +536,18 @@ class QuadRRTPlanner:
             weights = [self.grid_probs[k] for k in keys]
             chosen  = random.choices(keys, weights=weights, k=1)[0]
             i, j    = chosen
+
+
+            # Track for HMA report — count by cell zone
+            i, j = chosen
+            # Goal-region cells (top-right quadrant toward goal)
+            if math.hypot(
+                (self.map.origin_x + (i+0.5)*(self.map.w*self.map.res/GRID_N)) - self._plan_gx,
+                (self.map.origin_y + (j+0.5)*(self.map.h*self.map.res/GRID_N)) - self._plan_gy
+            ) <= GOAL_REGION_RADIUS:
+                self.goal_samples += 1
+            else:
+                self.corridor_samples += 1  # everything else counts as corridor
 
             # Update selection count and re-attenuate this cell (Eq. 12)
             self.grid_counts[(i, j)] += 1
@@ -687,7 +699,9 @@ class QuadRRTPlanner:
         self.total_nodes = 0
 
         self.raw_path_length = 0.0
-        self.smoothed_path_length = 0.0       
+        self.smoothed_path_length = 0.0  
+        self._plan_gx = gx
+        self._plan_gy = gy  
 
         obs = self.map.inflated_mask()
 
