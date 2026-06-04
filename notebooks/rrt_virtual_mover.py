@@ -700,8 +700,6 @@ class QuadRRTPlanner:
 
         self.raw_path_length = 0.0
         self.smoothed_path_length = 0.0  
-        self._plan_gx = gx
-        self._plan_gy = gy  
 
         obs = self.map.inflated_mask()
 
@@ -725,6 +723,9 @@ class QuadRRTPlanner:
         sx, sy = start_world
         gx, gy = goal_world
 
+        self._plan_gx = gx
+        self._plan_gy = gy  
+        
         # Validate start / goal
         scx, scy = self.map.world_to_cell(sx, sy)
         gcx, gcy = self.map.world_to_cell(gx, gy)
