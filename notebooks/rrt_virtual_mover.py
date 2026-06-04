@@ -736,7 +736,7 @@ class QuadRRTPlanner:
         goal_node_idx = None
         # ── Component 1: build grid probability table once ──
         self._init_sampling_grid(sx, sy, gx, gy, obs)
-        self.grid_counts = {}   # ensure fresh counts
+        
 
         for _ in range(MAX_ITERATIONS):
             # Sample
