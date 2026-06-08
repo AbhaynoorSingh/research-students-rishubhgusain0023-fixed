@@ -535,6 +535,7 @@ class QuadRRTPlanner:
         # ── Eq. 13: normalise so all cells sum to 1.0 ──
         total = sum(raw_probs.values())
         self.grid_probs = {k: v / total for k, v in raw_probs.items()}
+        self._grid_keys = list(self.grid_probs.keys())  # cache for _sample_from_grid
 
     def _sample_from_grid(self):
     # ── Explicit goal bias FIRST (replaces old GOAL_BIAS) ──
@@ -554,9 +555,12 @@ class QuadRRTPlanner:
         cw = (self.map.w * self.map.res) / n
         ch = (self.map.h * self.map.res) / n
 
-        keys    = list(self.grid_probs.keys())
-        weights = [self.grid_probs[k] for k in keys]
-        chosen  = random.choices(keys, weights=weights, k=1)[0]
+       # Use pre-sorted keys — only rebuild if needed
+        if not hasattr(self, '_grid_keys'):
+            self._grid_keys = list(self.grid_probs.keys())
+
+        weights = [self.grid_probs[k] for k in self._grid_keys]
+        chosen  = random.choices(self._grid_keys, weights=weights, k=1)[0]
         i, j    = chosen
 
         self.grid_counts[(i, j)] += 1
@@ -564,9 +568,9 @@ class QuadRRTPlanner:
 
         total = sum(self.grid_probs.values())
         if total < 0.5:
-            self.grid_probs = {k: v/total for k, v in self.grid_probs.items()}
+            self.grid_probs  = {k: v/total for k, v in self.grid_probs.items()}
+            self._grid_keys  = list(self.grid_probs.keys())  # rebuild after renorm
 
-        # Check if this cell is near goal — count accordingly
         cell_cx = ox + (i + 0.5) * cw
         cell_cy = oy + (j + 0.5) * ch
         if math.hypot(cell_cx - self._plan_gx,
@@ -1114,37 +1118,40 @@ class QuadRRTPlanner:
     def _rewire(self, nodes, new_idx, obs):
         """RRT*: check if routing through new_node shortens neighbour costs."""
         new_node = nodes[new_idx]
-        radius = RRT_STAR_RADIUS
-        nearby = self.quadtree.query_radius(new_node.x, new_node.y, radius)
+        radius   = RRT_STAR_RADIUS
+        nearby   = self.quadtree.query_radius(new_node.x, new_node.y, radius)
+
+        # Build children map once for fast lookup
+        children = {}
+        for i, n in enumerate(nodes):
+            if n.parent is not None:
+                children.setdefault(n.parent, []).append(i)
+
         for i in nearby:
             node = nodes[i]
             if i == new_idx or i == new_node.parent:
                 continue
             d = math.hypot(node.x - new_node.x, node.y - new_node.y)
-
             if d > radius:
                 continue
             new_cost = new_node.cost + d
             if new_cost < node.cost and \
-               self._collision_free(new_node.x, new_node.y,
-                                    node.x, node.y, obs):
+            self._collision_free(new_node.x, new_node.y, node.x, node.y, obs):
                 node.parent = new_idx
                 self.rewire_count += 1
-                node.cost   = new_cost
-                self._update_children_costs(nodes, i)
+                node.cost = new_cost
+                self._update_children_costs(nodes, i, children)
 
-    def _update_children_costs(self, nodes, parent_idx):
-        """Iterative BFS cost propagation — O(n) not O(n²)."""
+    def _update_children_costs(self, nodes, parent_idx, children):
+        """O(n) BFS using pre-built children map — no full scan per level."""
         queue = [parent_idx]
         while queue:
             pid = queue.pop(0)
-            parent = nodes[pid]
-            for i, node in enumerate(nodes):
-                if node.parent == pid:
-                    node.cost = parent.cost + math.hypot(
-                        node.x - parent.x,
-                        node.y - parent.y)
-                    queue.append(i)
+            for child_idx in children.get(pid, []):
+                nodes[child_idx].cost = nodes[pid].cost + math.hypot(
+                    nodes[child_idx].x - nodes[pid].x,
+                    nodes[child_idx].y - nodes[pid].y)
+                queue.append(child_idx)
 
     def _extract_path(self, nodes, goal_idx):
         path = []
@@ -1165,7 +1172,7 @@ class QuadRRTPlanner:
                         return nx, ny
         return None, None
 
-    def smooth_path(self, waypoints, obs, iterations=50):
+    def smooth_path(self, waypoints, obs, iterations=20):
         if len(waypoints) < 3:
             return waypoints
         # obs = self.map.inflated_mask()
@@ -1183,7 +1190,7 @@ class QuadRRTPlanner:
                     pts[i] = (cx, cy)
         return pts
    
-    def shortcut_smooth(self, path, obs, iterations=50):
+    def shortcut_smooth(self, path, obs, iterations=20):
         """Remove unnecessary waypoints by connecting distant nodes directly."""
         if len(path) < 3:
             return path
