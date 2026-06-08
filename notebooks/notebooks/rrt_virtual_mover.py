@@ -771,7 +771,7 @@ class QuadRRTPlanner:
         goal_node_idx = None
         # ── Component 1: build grid probability table once ──
         self._init_sampling_grid(sx, sy, gx, gy, obs)
-        
+        children_map = {}
 
         for _ in range(MAX_ITERATIONS):
             # Sample
@@ -807,14 +807,16 @@ class QuadRRTPlanner:
                 new_node.heading = new_heading 
                 new_idx = len(nodes)
                 nodes.append(new_node)
+                children_map.setdefault(parent_idx, []).append(new_idx)
                 self.quadtree.insert(
                 QuadTreeNode(nx, ny, len(nodes)-1)
                 )   
                 # Rewire
-                self._rewire(nodes, new_idx, obs)
+                self._rewire(nodes, new_idx, obs, children_map)
             else:
                 new_node = RRTNode(nx, ny, parent=nearest_idx, cost=new_cost , heading=new_heading)
                 nodes.append(new_node)
+                children_map.setdefault(nearest_idx, []).append(len(nodes)-1)
                 self.quadtree.insert(
                 QuadTreeNode(nx, ny, len(nodes)-1)
                 )
