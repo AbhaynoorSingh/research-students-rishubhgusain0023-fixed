@@ -366,13 +366,14 @@ class QuadTree:
 #  RRT / RRT* Planner
 # ══════════════════════════════════════════════════════════════
 class RRTNode:
-    __slots__ = ("x", "y", "parent", "cost")
+    __slots__ = ("x", "y", "parent", "cost","heading")
 
-    def __init__(self, x, y, parent=None, cost=0.0):
+    def __init__(self, x, y, parent=None, cost=0.0 , heading=0.0):
         self.x      = x
         self.y      = y
         self.parent = parent   # index into node list
         self.cost   = cost     # RRT* path cost from root
+        self.heading = heading   # ← heading when this node was created
 
 
 class QuadRRTPlanner:
@@ -780,6 +781,7 @@ class QuadRRTPlanner:
             # Nearest node
             nearest_idx = self.quadtree.nearest(rx, ry)[1]
             nearest     = nodes[nearest_idx]
+            self._current_heading = nearest.heading
             # Steer — Component 2: APF-guided expansion
             nx, ny, new_heading = self._apf_steer(
                 nearest.x, nearest.y,
@@ -792,8 +794,7 @@ class QuadRRTPlanner:
             if not self._collision_free(nearest.x, nearest.y, nx, ny, obs):
                 continue
 
-            # Update heading for next iteration
-            self._current_heading = new_heading
+         
 
             new_cost = nearest.cost + math.hypot(nx - nearest.x,
                                                   ny - nearest.y)
@@ -802,6 +803,7 @@ class QuadRRTPlanner:
                 # RRT*: find neighbours and choose best parent
                 new_node, parent_idx = self._choose_parent(
                     nodes, nx, ny, new_cost, obs)
+                new_node.heading = new_heading 
                 new_idx = len(nodes)
                 nodes.append(new_node)
                 self.quadtree.insert(
@@ -810,7 +812,7 @@ class QuadRRTPlanner:
                 # Rewire
                 self._rewire(nodes, new_idx, obs)
             else:
-                new_node = RRTNode(nx, ny, parent=nearest_idx, cost=new_cost)
+                new_node = RRTNode(nx, ny, parent=nearest_idx, cost=new_cost , heading=new_heading)
                 nodes.append(new_node)
                 self.quadtree.insert(
                 QuadTreeNode(nx, ny, len(nodes)-1)
@@ -1092,15 +1094,13 @@ class QuadRRTPlanner:
         return True
 
     def _choose_parent(self, nodes, nx, ny, default_cost, obs):
-        """RRT*: pick parent that gives lowest cost."""
         best_parent = None
         best_cost   = float('inf')
-        radius = RRT_STAR_RADIUS
-        nearby  = self.quadtree.query_radius(nx, ny, radius)
+        radius      = RRT_STAR_RADIUS
+        nearby      = self.quadtree.query_radius(nx, ny, radius)
         for i in nearby:
             node = nodes[i]
             d = math.hypot(node.x - nx, node.y - ny)
-
             if d > radius:
                 continue
             if not self._collision_free(node.x, node.y, nx, ny, obs):
@@ -1110,18 +1110,19 @@ class QuadRRTPlanner:
                 best_cost   = c
                 best_parent = i
         if best_parent is None:
-            # Fall back to nearest
             best_parent = self._nearest(nodes, nx, ny)
-            best_cost = default_cost
+            best_cost   = default_cost
+        # heading=0.0 placeholder — caller sets it after
         return RRTNode(nx, ny, parent=best_parent, cost=best_cost), best_parent
 
+
+
     def _rewire(self, nodes, new_idx, obs):
-        """RRT*: check if routing through new_node shortens neighbour costs."""
         new_node = nodes[new_idx]
         radius   = RRT_STAR_RADIUS
         nearby   = self.quadtree.query_radius(new_node.x, new_node.y, radius)
 
-        # Build children map once for fast lookup
+        # Build children map once — O(1) lookup vs O(n) scan
         children = {}
         for i, n in enumerate(nodes):
             if n.parent is not None:
@@ -1139,11 +1140,11 @@ class QuadRRTPlanner:
             self._collision_free(new_node.x, new_node.y, node.x, node.y, obs):
                 node.parent = new_idx
                 self.rewire_count += 1
-                node.cost = new_cost
+                node.cost   = new_cost
                 self._update_children_costs(nodes, i, children)
 
     def _update_children_costs(self, nodes, parent_idx, children):
-        """O(n) BFS using pre-built children map — no full scan per level."""
+        """O(depth) BFS using pre-built children map."""
         queue = [parent_idx]
         while queue:
             pid = queue.pop(0)
