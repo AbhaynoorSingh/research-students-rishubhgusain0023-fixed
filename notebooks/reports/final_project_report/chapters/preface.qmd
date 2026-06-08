@@ -1,0 +1,9 @@
+# Preface {.unnumbered}
+
+This report documents approximately four months of research work carried out on the development of a natural-language-driven navigation pipeline for an embedded mobile robot. The project was conducted at Wilfrid Laurier University under the supervision of the research advisor, with the ROSMASTER X3 PLUS platform serving as the primary experimental hardware.
+
+The work described in the following chapters covers the full journey of bringing a physical robot from an uninitialized state to a point where it can accept a high-level natural-language instruction, build a three-dimensional understanding of its surroundings, and use visual perception to identify a target object. Every subsystem described here has been implemented and tested on real hardware accessed remotely via RustDesk.
+
+Rather than focusing on a single algorithmic contribution, this report takes a system-level view. It describes the architectural decisions made at each stage, the practical problems encountered during deployment, and the engineering fixes that were applied. It also documents the switch from A\* to RRT\* as the primary path planner, the integration of RTAB-Map for dense three-dimensional mapping, and the design of a modular task-execution state machine that links natural-language input to arm-camera scanning, object detection, and autonomous navigation.
+
+The intended audience for this report includes the supervising professor, future research students continuing work on the same platform, and peers interested in the practical realities of deploying Vision-Language Navigation (VLN) research on embedded robotic hardware. Effort has been made to record not only what works, but also the debugging sequences and hardware-specific discoveries that proved necessary to reach a working system, so that subsequent students on the project can avoid rediscovering the same issues.
