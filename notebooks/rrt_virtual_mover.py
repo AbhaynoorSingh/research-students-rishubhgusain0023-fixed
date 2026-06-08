@@ -735,8 +735,6 @@ class QuadRRTPlanner:
         sx, sy = start_world
         gx, gy = goal_world
 
-        self._plan_gx = gx
-        self._plan_gy = gy  
 
         # Validate start / goal
         scx, scy = self.map.world_to_cell(sx, sy)
@@ -749,6 +747,10 @@ class QuadRRTPlanner:
             if gcx is None:
                 return []
             gx, gy = self.map.cell_to_world(gcx, gcy)
+
+        self._plan_gx = gx
+        self._plan_gy = gy  
+
 
         # Map bounds in world coords
         wx_min = self.map.origin_x
@@ -913,7 +915,7 @@ class QuadRRTPlanner:
         nearest_oy  = ny
 
         # Find closest obstacle cell in world coords
-        obs_cells = np.argwhere(obs)
+        # obs_cells = np.argwhere(obs)
         for cell in obs_cells:
             ox = cell[0] * self.map.res + self.map.origin_x
             oy = cell[1] * self.map.res + self.map.origin_y
@@ -973,7 +975,7 @@ class QuadRRTPlanner:
         # ── 4. Repulsive forces from obstacle cells (Eq. 18–21) ──
         Frep_x   = 0.0
         Frep_y   = 0.0
-        obs_cells = np.argwhere(obs)
+        # obs_cells = np.argwhere(obs)
         n_obs     = max(1, len(obs_cells))
 
         for cell in obs_cells:
