@@ -183,6 +183,11 @@ class UnifiedMainNode(Node):
             resolution=0.05,
         )
         self.slam.reset()
+        
+        # ---stuck detection variables-------------------------
+        self.last_progress_time = time.time()
+        self.last_progress_x = 0.0
+        self.last_progress_y = 0.0
 
         # ---stuck detection variables-------------------------
         self.last_progress_time = time.time()
@@ -580,7 +585,6 @@ class UnifiedMainNode(Node):
 
     def _replan(self):
         self.task_state = TaskState.PLANNING
-
         if self.goal is None:
             return
 
@@ -876,6 +880,84 @@ class UnifiedMainNode(Node):
         pts = np.array(self.waypoints)
         return float(np.sum(
             np.linalg.norm(np.diff(pts, axis=0), axis=1)))
+        
+    
+    # Visualization through a graph    
+    def visualize_navigation(self):
+
+        if not self.waypoints:
+            return
+    
+        plt.figure(figsize=(10, 10))
+    
+        grid = self.slam._map.log_odds > 2.0
+    
+        extent = [
+            self.slam._map.origin_x,
+            self.slam._map.origin_x +
+            (self.slam._map.w * self.slam._map.res),
+            self.slam._map.origin_y,
+            self.slam._map.origin_y +
+            (self.slam._map.h * self.slam._map.res)
+        ]
+    
+        plt.imshow(
+            grid.T.astype(float),
+            origin='lower',
+            cmap='gray_r',
+            interpolation='nearest',
+            extent=extent
+        )
+        
+        # waypoint markers
+        for i, (wx, wy) in enumerate(self.waypoints):
+            plt.plot(wx, wy, 'ro')
+            plt.text(wx, wy, str(i))
+    
+        # Robot
+        plt.plot(
+            self.vx,
+            self.vy,
+            'bo',
+            markersize=10,
+            label='Robot'
+        )
+    
+        # Goal
+        if self.goal:
+            plt.plot(
+                self.goal[0],
+                self.goal[1],
+                'rx',
+                markersize=12,
+                label='Goal'
+            )
+    
+        # Path
+        px = []
+        py = []
+    
+        for wx, wy in self.waypoints:
+            px.append(wx)
+            py.append(wy)
+    
+        plt.plot(
+            px,
+            py,
+            'g-',
+            linewidth=2,
+            label='Path'
+        )
+    
+        plt.xlabel("X (m)")
+        plt.ylabel("Y (m)")
+        plt.title(
+            f"{self.active_planner.upper()} Navigation"
+        )
+        plt.legend()
+        plt.grid(True)
+    
+        plt.show()
 
     # Visualization through a graph
 
