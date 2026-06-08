@@ -93,12 +93,12 @@ GRID_P_BASE      = 0.05    # base probability every cell starts with
 APF_K_ATT       = 1.0    # attractive gain toward goal
 APF_K_RAND      = 0.4    # attractive gain toward random sample
 APF_K_REP       = 1.5    # repulsive gain from obstacles
-APF_D0          = 1.5    # repulsive influence range in metres
+APF_D0          = 0.8    # repulsive influence range in metres
 APF_N_ADJ       = 2      # repulsive adjustment exponent
 APF_PSI_MAX     = math.radians(60)   # max heading change per step (60°)
 APF_ALPHA0      = math.radians(45)   # angle threshold for step reduction
 APF_P_OBS_THRESH = 0.5   # collision density threshold to suppress forces
-APF_N_DETECT    = 5      # number of perpendicular detection points
+APF_N_DETECT    = 3      # number of perpendicular detection points
 
 
 
@@ -1039,7 +1039,15 @@ class QuadRRTPlanner:
         # When current neighbourhood is too dense, suppress both
         # attractive and repulsive forces to let the tree grow freely
          # ── 5. Collision density suppression — skip if no local obstacles ──
-        if len(local_obs) > 0:
+        min_local_dist = float('inf')
+        for cell in local_obs:
+            ox = cell[0] * self.map.res + self.map.origin_x
+            oy = cell[1] * self.map.res + self.map.origin_y
+            d  = math.hypot(nx - ox, ny - oy)
+            if d < min_local_dist:
+                min_local_dist = d
+
+        if min_local_dist < 0.6:
             P_obs = self._collision_density(nx, ny, gx, gy, obs)
             if P_obs > APF_P_OBS_THRESH:
                 Fatt_x *= 0.01;  Fatt_y *= 0.01
