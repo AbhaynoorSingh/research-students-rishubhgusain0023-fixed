@@ -825,10 +825,10 @@ class QuadRRTPlanner:
         path = self._extract_path(nodes, goal_node_idx)
         raw_length = self.path_length(path)
         # Step 1: averaging smooth
-        path = self.smooth_path(path)
+        path = self.smooth_path(path,obs)
 
         # Step 2: shortcut smooth (NEW)
-        path = self.shortcut_smooth(path)
+        path = self.shortcut_smooth(path,obs)
         self.latest_nodes = nodes
         elapsed = time.time() - start_time
         smooth_length = self.path_length(path)
@@ -1091,11 +1091,8 @@ class QuadRRTPlanner:
         """RRT*: pick parent that gives lowest cost."""
         best_parent = None
         best_cost   = float('inf')
-        nearby = self.quadtree.query_radius(
-        nx, ny, RRT_STAR_RADIUS
-        )
-
-        radius = max(0.5,min(RRT_STAR_RADIUS,2.0 * math.sqrt(math.log(len(nodes)+1)/(len(nodes)+1))))
+        radius = RRT_STAR_RADIUS
+        nearby  = self.quadtree.query_radius(nx, ny, radius)
         for i in nearby:
             node = nodes[i]
             d = math.hypot(node.x - nx, node.y - ny)
@@ -1117,13 +1114,8 @@ class QuadRRTPlanner:
     def _rewire(self, nodes, new_idx, obs):
         """RRT*: check if routing through new_node shortens neighbour costs."""
         new_node = nodes[new_idx]
-        nearby = self.quadtree.query_radius(
-        new_node.x,
-        new_node.y,
-        RRT_STAR_RADIUS
-        )
-
-        radius = max(0.5,min(RRT_STAR_RADIUS,2.0 * math.sqrt(math.log(len(nodes)+1)/(len(nodes)+1))))
+        radius = RRT_STAR_RADIUS
+        nearby = self.quadtree.query_radius(new_node.x, new_node.y, radius)
         for i in nearby:
             node = nodes[i]
             if i == new_idx or i == new_node.parent:
@@ -1142,26 +1134,17 @@ class QuadRRTPlanner:
                 self._update_children_costs(nodes, i)
 
     def _update_children_costs(self, nodes, parent_idx):
-        """
-        Recursively update costs of all descendants
-        after a rewire operation.
-        """
-
-        parent = nodes[parent_idx]
-
-        for i, node in enumerate(nodes):
-
-            if node.parent == parent_idx:
-
-                edge_cost = math.hypot(
-                    node.x - parent.x,
-                    node.y - parent.y
-                )
-
-                node.cost = parent.cost + edge_cost
-
-                # Recursively update grandchildren
-                self._update_children_costs(nodes, i)
+        """Iterative BFS cost propagation — O(n) not O(n²)."""
+        queue = [parent_idx]
+        while queue:
+            pid = queue.pop(0)
+            parent = nodes[pid]
+            for i, node in enumerate(nodes):
+                if node.parent == pid:
+                    node.cost = parent.cost + math.hypot(
+                        node.x - parent.x,
+                        node.y - parent.y)
+                    queue.append(i)
 
     def _extract_path(self, nodes, goal_idx):
         path = []
@@ -1182,10 +1165,10 @@ class QuadRRTPlanner:
                         return nx, ny
         return None, None
 
-    def smooth_path(self, waypoints, iterations=50):
+    def smooth_path(self, waypoints, obs, iterations=50):
         if len(waypoints) < 3:
             return waypoints
-        obs = self.map.inflated_mask()
+        # obs = self.map.inflated_mask()
         pts = list(waypoints)
         for _ in range(iterations):
             for i in range(1, len(pts) - 1):
@@ -1200,7 +1183,7 @@ class QuadRRTPlanner:
                     pts[i] = (cx, cy)
         return pts
    
-    def shortcut_smooth(self, path, iterations=50):
+    def shortcut_smooth(self, path, obs, iterations=50):
         """Remove unnecessary waypoints by connecting distant nodes directly."""
         if len(path) < 3:
             return path
@@ -1208,7 +1191,7 @@ class QuadRRTPlanner:
         # temporary check
         new_path = list(path)
 
-        obs = self.map.inflated_mask()
+        # obs = self.map.inflated_mask()
         for _ in range(iterations):
             if len(new_path) < 3:
                 break
