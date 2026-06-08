@@ -1038,10 +1038,12 @@ class QuadRRTPlanner:
         # ── 5. Collision density suppression (Eq. 22–23) ─────────
         # When current neighbourhood is too dense, suppress both
         # attractive and repulsive forces to let the tree grow freely
-        P_obs = self._collision_density(nx, ny, gx, gy, obs)
-        if P_obs > APF_P_OBS_THRESH:
-            Fatt_x *= 0.01;  Fatt_y *= 0.01
-            Frep_x *= 0.01;  Frep_y *= 0.01
+         # ── 5. Collision density suppression — skip if no local obstacles ──
+        if len(local_obs) > 0:
+            P_obs = self._collision_density(nx, ny, gx, gy, obs)
+            if P_obs > APF_P_OBS_THRESH:
+                Fatt_x *= 0.01;  Fatt_y *= 0.01
+                Frep_x *= 0.01;  Frep_y *= 0.01
 
         # ── 6. Resultant force direction ──────────────────────────
         Ftotal_x = Fatt_x + Frep_x
