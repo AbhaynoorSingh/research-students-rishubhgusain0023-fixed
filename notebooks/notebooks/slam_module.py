@@ -109,6 +109,23 @@ class _OccupancyMap:
                 err += dx
                 y0  += sy
 
+    def collision_free_fast(self, x0, y0, x1, y1, obs):
+        """Numpy-based line collision check — faster than Bresenham generator."""
+        cx0 = int((x0 - self.origin_x) / self.res)
+        cy0 = int((y0 - self.origin_y) / self.res)
+        cx1 = int((x1 - self.origin_x) / self.res)
+        cy1 = int((y1 - self.origin_y) / self.res)
+
+        steps = max(abs(cx1 - cx0), abs(cy1 - cy0), 1)
+        xs = np.round(np.linspace(cx0, cx1, steps + 1)).astype(int)
+        ys = np.round(np.linspace(cy0, cy1, steps + 1)).astype(int)
+
+        valid = (xs >= 0) & (xs < self.w) & (ys >= 0) & (ys < self.h)
+        if not np.all(valid):
+            return False
+        return not np.any(obs[xs, ys])
+
+
     # ── map update from a single scan ─────────────────────────
 
     def update(self, scan: LaserScan, robot_x, robot_y, robot_yaw):
