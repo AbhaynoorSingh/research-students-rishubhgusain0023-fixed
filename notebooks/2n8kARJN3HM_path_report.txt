@@ -1,0 +1,16 @@
+
+=== PATH PLANNING REPORT ===
+
+Path Information:
+  - Number of waypoints: 7
+  - Total distance: 14.22 units
+  - Number of segments: 6
+  
+Distance Statistics:
+  - Average segment length: 2.37 units
+  - Maximum segment length: 3.99 units
+  - Minimum segment length: 1.36 units
+
+Navigation Statistics:
+  - Number of turns: 5
+  - Average turn angle: 23.0°\n  - Maximum turn angle: 37.5°\n  - Minimum turn angle: 6.6°\n\nInstruction: Leave the office heading to the dining room. Walk through the room and into the kitchen. Stop in the doorway to the sitting room.\n\nExtracted Information:\n  - rooms: ['kitchen', 'dining room', 'office', 'sitting room', 'doorway']\n  - objects: ['door']\n  - actions: ['walk', 'stop', 'head', 'through', 'leave']\n\nWaypoint Sequence:\n  1. 3611ca6eb11f4a32a7cd3c073862860d\n  2. b2d31a869b644c738697a237d4e724b5\n  3. 3d6c224493aa4b8fa5fd16e7ae8e2d66\n  4. 82ee7783a95b4beeb1b8c518107c9ae2\n  5. 2d21aec2e48b4797ad0367e96fd316f4\n  6. 397cae1de3b74644804196b838fd3c8a\n  7. 5b4f88b00af3413eb8a3706a62a761e1\n

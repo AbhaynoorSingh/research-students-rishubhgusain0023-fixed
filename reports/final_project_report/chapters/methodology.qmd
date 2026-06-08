@@ -1,32 +1,185 @@
 # Methodology
 
-## Introduction to Python for Machine Learning
+This chapter describes how the system was built. It is organized to follow the template's methodology structure where it makes sense — platform configuration replacing "data split," subsystem design replacing "model planning," and system integration replacing "final model building" — but the content describes the design of a unified robotics pipeline rather than a machine-learning model.
 
 ## Platform and Machine Configurations Used
-Such Google Colab, Kaggle, Syzygy, or your own machine then the machine configuration.
 
-## Data Split
+All development was performed remotely on the Jetson on-board the ROSMASTER X3 PLUS, accessed through RustDesk. The Jetson was flashed with Ubuntu 22.04 and ROS 2 Humble Hawksbill. Table 2 lists the key software and library versions used during the project.
 
-Data splitting is the process of dividing the data into training, validation, and test sets. This step can help you evaluate the performance of the model on new data.
+| Component              | Version                | Notes                                              |
+|------------------------|------------------------|----------------------------------------------------|
+| Operating system       | Ubuntu 22.04           | Stock Jetson image                                 |
+| ROS 2                  | Humble Hawksbill       | Default on Ubuntu 22.04                            |
+| Python                 | 3.10                   | System Python                                      |
+| PyTorch                | 2.5.0 (GPU)            | Used by YOLOv8                                     |
+| Ultralytics YOLOv8     | 8.3.65                 | `yolov8n.pt` nano weights                          |
+| `Rosmaster_Lib`        | 3.3.9                  | Installed from `~/Rosmaster/`                      |
+| RTAB-Map               | `ros-humble-rtabmap-ros` | Used for RGB-D SLAM and 3D reconstruction        |
+| SciPy                  | 1.x                    | Used by the obstacle-inflation kernel in A\*       |
 
-## Model Planning
+: Software versions used throughout the project {#tbl-versions}
 
-The next step is to select the appropriate machine learning or deep learning models ( 2 - 3 ) that can be used to solve the problem. This involves evaluating different models and selecting the one that is best suited for the problem.
+Development was performed in Visual Studio Code over an SSH tunnel into the Jetson. Source was managed through the `rishubh-updates` branch of the `wlu-labs/research-students-rishubhgusain0023` GitHub repository, with authentication handled via a GitHub Personal Access Token.
 
-## Model Training: 
+Some reference code was provided at the start of the project as a starting point, but the subsystems described in this chapter were designed and implemented from scratch. A peer contributed the Rosmaster wrist-camera driver (`camera_rosmaster.py`, version 4.1.3) which is used by the arm-scan component.
 
-This involves using the training data to adjust the model parameters to improve its accuracy.
+## System Architecture
 
-## Model Evaluation
+The full pipeline is organized into one unified ROS 2 node (`main.py`, class `UnifiedMainNode`) that composes five previously-developed subsystems. @fig-architecture illustrates the data flow.
 
-Once the model is trained, the next step is to evaluate its performance on a validation dataset. 
+1. **ROS 2 bringup layer** — Yahboom-supplied drivers and launch files that publish raw sensor data and accept motor commands.
+2. **SLAM layer** — a custom `SLAMModule` (`slam_module.py`) that builds a log-odds occupancy grid from `/scan` and `/odom`, complemented by RTAB-Map for 3D reconstruction and visual odometry from RGB-D.
+3. **Path-planning layer** — a two-tier strategy with RRT\* (`rrt_virtual_mover.py`) as the primary planner and an A\*-based grid planner (`lidar_slam_planner.py`) as the fallback. Both planners operate on the same occupancy grid and publish to `/planned_path`.
+4. **Perception and task-execution layer** — the unified node subscribes to a `/task` topic, drives an arm-mounted camera sweep, runs YOLOv8 object detection on each captured frame, converts a successful detection into a world-frame goal using LiDAR-fused bearing estimation, publishes the goal, follows the resulting path via a virtual mover, and performs an arm interaction sequence on arrival.
+5. **Virtual executor** — an in-node virtual mover that follows the planned path at a fixed speed, publishing fake odometry and TF so that the full pipeline can be exercised without consuming on-site robot time. The real motor driver (`Mcnamu_driver_X3`) subscribes to `/cmd_vel` and accepts the same velocity commands when physical motion is desired.
 
-## Model Optimization
+![Sensing, mapping, and navigation pipeline of the unified system. Sensor inputs (LiDAR scans, RGB-D frames, arm-camera close-range scans) are fused and consumed by the SLAM module (`slam_module.py`), which produces the occupancy map, the robot pose, and an explored-ratio metric. On receipt of a goal on `/goal`, the RRT\* planner computes a collision-free path, which the virtual mover then follows at 0.3 m/s. The goal-reached check (0.30 m tolerance) closes the loop, triggering either a new plan or the next task. Higher-level components (natural-language task parsing, YOLOv8 detection, LiDAR-fused bearing estimation, and the arm interaction sequence) are layered on top of this core and are described separately in the following sections.](../figures/flow_chart.png){#fig-architecture width=90%}
 
-Based on the results of the model evaluation, the next step is to optimize the model to improve its performance. This involves making changes to the model's architecture, tuning the hyperparameters, and retraining the model.
+## SLAM Module
 
-## Final Model Building
+The SLAM layer combines two components that serve different purposes. A custom log-odds occupancy-grid module (`slam_module.py`) produces the 2D occupancy map that the planners consume, and RTAB-Map (`x3_rtabmap_depth.launch.py`) produces a dense 3D point cloud for visualization and verification.
 
-Once the model is optimized, the final step is to fit the model and report final test error for each model
+### Log-odds occupancy grid
 
-Present the information with support Screen Shots/ Figures (Each Figure must be numbered and Description of Figure must be provided)
+The occupancy grid is maintained in a $w \times h$ array of log-odds values, where $w$ and $h$ are determined by a configurable world size (20 m × 20 m at a resolution of 0.05 m per cell, yielding a $400 \times 400$ grid). Each cell begins at an "unknown" value of $-1.0$. When a LiDAR scan arrives, the module casts a Bresenham ray from the robot's grid cell toward the endpoint of each valid return. Cells along the ray have the free-space increment $L_\text{free} = -0.40$ added to their log-odds, and the endpoint cell has the occupied increment $L_\text{occ} = +0.85$ added. Log-odds values are clamped to $[L_\text{min}, L_\text{max}] = [-3.5, +3.5]$ to prevent saturation.
+
+A small circular region around the robot's current pose is always forced below zero, which prevents the robot's own footprint from ever being labelled as an obstacle. The probability that a cell is occupied is recovered from its log-odds value via
+
+$$p(\text{occupied}) = 1 - \frac{1}{1 + \exp(L)}$$
+
+and the obstacle mask used by the planners is the set of cells with $p > 0.65$.
+
+### Pose tracking
+
+A simple pose tracker subscribes to `/odom` (from the motor driver) and also to `/odom_raw` (from the virtual mover), so that the same SLAM module can operate whether the robot is physically moving or being simulated. From either source it extracts the planar position $(x, y)$ and yaw angle. Yaw is computed from the quaternion orientation using the standard conversion
+
+$$\text{yaw} = \arctan_2\!\bigl(2 (q_w q_z + q_x q_y),\; 1 - 2 (q_y^2 + q_z^2)\bigr).$$
+
+### RTAB-Map for 3D reconstruction
+
+In parallel with the 2D occupancy grid, RTAB-Map is launched via `x3_rtabmap_depth.launch.py`. The launch file spawns four nodes: `rgbd_sync` time-aligns the color and depth streams, `rgbd_odometry` produces visual odometry, `rtabmap` serves as the SLAM backend with `Grid/3D` and `RGBD/CreateOccupancyGrid` enabled, and `rtabmap_viz` provides an RViz-like visualization window. All four nodes use `approx_sync: True` with a 20 ms window, which was found to be necessary because the color and depth streams on this hardware are not perfectly synchronized. RTAB-Map's ability to produce both dense 3D point clouds and 2D occupancy grids from a single RGB-D pipeline has been demonstrated across a wide range of platforms and datasets [@labbe_rtab-map_2019].
+
+## A\* Grid Path Planner (Fallback)
+
+The first planner implemented was an A\* grid planner, documented in `lidar_slam_planner.py`. It operates directly on the obstacle mask produced by the occupancy grid and serves as the fallback in the current system.
+
+### Obstacle inflation
+
+Before planning, the raw obstacle mask is inflated by a configurable radius (0.15 m by default, corresponding to three cells at 0.05 m/cell) using a binary dilation with a square structuring element. This accounts for the physical footprint of the robot and discourages paths that pass uncomfortably close to walls. A small circular region around the current robot pose is then cleared from the inflated mask, so that the planner does not mistake inflated walls near the robot for an obstacle blocking its own start cell.
+
+### A\* search
+
+The planner uses an 8-connected grid with unit costs of 1 for cardinal neighbours and $\sqrt{2}$ for diagonals, and the octile-distance heuristic
+
+$$h(a, b) = \max(|a_x - b_x|, |a_y - b_y|) + (\sqrt{2} - 1) \cdot \min(|a_x - b_x|, |a_y - b_y|).$$
+
+If the goal cell is itself inside the inflated obstacle mask, the planner searches outward in expanding squares until it finds a nearby free cell, and plans to that cell instead. This provides graceful degradation when the user publishes a goal that lies slightly inside a wall or at the edge of the map.
+
+After A\* returns a cell-level path, a simple moving-average filter with a configurable window (default five cells) is applied to smooth the waypoints before publication.
+
+## RRT\* Sampling-Based Planner (Primary)
+
+On supervisor guidance the primary path planner was switched from A\* to RRT\*, motivated by the supervisor's finding that RRT\* would be more efficient on this class of maps. This was subsequently confirmed experimentally during the project (see Chapter 4). RRT\* is implemented in `rrt_virtual_mover.py`.
+
+### Algorithm summary
+
+RRT\* incrementally builds a tree of collision-free configurations rooted at the start pose. At each iteration, a random sample $x_\text{rand}$ is drawn from the configuration space (biased toward the goal with probability 0.1). The nearest tree node $x_\text{near}$ is found, and a new node $x_\text{new}$ is steered from $x_\text{near}$ toward $x_\text{rand}$ by a fixed step size (0.25 m). If the segment from $x_\text{near}$ to $x_\text{new}$ is collision-free with respect to the inflated obstacle mask, $x_\text{new}$ is added to the tree.
+
+The "star" in RRT\* comes from the rewiring step: after a new node is added, the planner considers all existing nodes within a rewiring radius and reconnects them through $x_\text{new}$ if doing so would reduce their cumulative cost. This gives RRT\* the asymptotic-optimality property that plain RRT lacks [@karaman_sampling-based_2011]. Search terminates when a node has been added within the goal tolerance (0.30 m) or a maximum iteration count is reached.
+
+### Two-tier planner fallback
+
+In the unified node, RRT\* is invoked first for every planning request. If RRT\* fails to find a path within its iteration budget, the A\* planner is invoked as a fallback on the same occupancy grid. The fallback exists because RRT\*'s stochasticity means it occasionally fails on a particular random seed even when a valid path exists; A\* is deterministic and will always find a path if one is present in the discretized grid. Which planner produced the accepted path is tracked in an `active_planner` field so that downstream logs and metrics can distinguish primary-success runs from fallback runs.
+
+### Why RRT\* was preferred on this platform
+
+The indoor environments encountered in this project are relatively open: most paths have only a handful of obstacles. In that setting, RRT\*'s waypoint count is dominated by the number of random samples needed, which in practice is small. A\* on a $400 \times 400$ grid with 8-connected neighbours produces hundreds of waypoints for even a short path, and smoothing is required to produce a reasonable trajectory. RRT\* produces a trajectory consisting of a handful of waypoints natively, with no additional smoothing needed beyond the planner's internal path-simplification pass. Recent work confirms that enhanced RRT\* variants achieve meaningful reductions in both path length and turning-point count compared to grid-based alternatives [@yin_route_2024]. Chapter 4 quantifies this difference.
+
+## Natural-Language Task Interface
+
+The unified node subscribes to a `/task` topic that accepts `std_msgs/String` messages. Incoming strings are lowercased and matched against a task-to-label dictionary that maps natural-language tokens to YOLOv8 class labels. An excerpt of the dictionary is reproduced below:
+
+```python
+TASK_LABEL_MAP = {
+    "cup of water": ["cup", "bottle"],
+    "water":        ["bottle", "cup"],
+    "cup":          ["cup"],
+    "bottle":       ["bottle"],
+    "chair":        ["chair"],
+    "person":       ["person"],
+    "phone":        ["cell phone"],
+    "book":         ["book"],
+    "laptop":       ["laptop"],
+}
+```
+
+This design keeps instruction parsing minimal while allowing a one-to-many mapping (for example, `"cup of water"` searches for both `cup` and `bottle`, since either is a plausible container). When a task is received the node transitions from the IDLE state to the SCANNING state and immediately invokes the visual-scan routine.
+
+## Arm-Camera Scan and Object Detection
+
+### Servo sweep
+
+The arm's base servo (servo ID 1, 0-180-degree range) is commanded to three successive positions (45°, 90°, 135°), with a 1.5-second settle delay after each move. This provides a roughly 90-degree horizontal field of view from the wrist camera without requiring the robot base to rotate. At each position, one image is captured using the `Rosmaster_Camera` OpenCV driver on device index 1, and the image is saved to `~/scan_images/` for later review.
+
+### YOLOv8 detection
+
+Each captured image is passed to the YOLOv8 nano model (`yolov8n.pt`, loaded via the `ultralytics` Python package). YOLOv8 introduces an anchor-free detection head with a CSPNet backbone and FPN+PAN neck, offering strong real-time performance across diverse hardware platforms [@yaseen_what_2024]. Inference is run at a confidence threshold of 0.40. The detector returns a list of bounding boxes with class labels and confidence scores. For each detection, the class label is compared against the target-label list associated with the current task; when a match is found, the normalized horizontal center of the bounding box and the detection's confidence are recorded. Across all three sweep positions the detection with the highest confidence is selected as the target.
+
+### LiDAR-fused bearing estimation
+
+Converting a 2D bounding-box detection into a 3D world pose normally requires depth information, which the wrist camera does not supply on its own. The system instead fuses the arm servo angle, the in-frame bounding-box location, and the LiDAR range at the corresponding bearing.
+
+Let $\theta_s$ denote the arm-servo angle (with 90° defined as straight ahead of the robot base), $c_x \in [0, 1]$ denote the normalized horizontal center of the detection in the camera frame, and $\psi_r$ denote the robot's current yaw. The detection's world bearing is computed as
+
+$$\theta_\text{world} = \bigl(\theta_s - 90°\bigr) + \bigl(c_x - 0.5\bigr) \cdot \text{HFOV}_\text{cam} + \psi_r,$$
+
+where $\text{HFOV}_\text{cam} = 60°$ is the camera's horizontal field of view. The LiDAR scan is then queried for the range at this bearing, averaged over a small window (five rays to either side) to reduce noise. If no valid range is available (for example, the object is beyond the LiDAR's maximum range), the system falls back to a default distance of 1.5 m. The estimated world position of the target object is then
+
+$$(x_\text{obj}, y_\text{obj}) = (x_\text{robot} + d \cos\theta_\text{world},\; y_\text{robot} + d \sin\theta_\text{world}).$$
+
+This position is used as the navigation goal. The approach trades depth accuracy for simplicity: it assumes that the LiDAR ray at the detection bearing hits the object (or something close to it). This is reasonable for floor-standing objects such as chairs and people, and degrades gracefully for small tabletop objects (where the ray may hit the table edge or the wall behind the object, producing an overshoot rather than a miss).
+
+## Task State Machine
+
+The unified node drives the entire pipeline through a finite-state machine with six states, defined as class constants:
+
+- **IDLE** — the default state on startup. Waits for a `/task` or `/goal` message.
+- **SCANNING** — the arm sweep and YOLO detection are in progress.
+- **NAVIGATING** — a goal has been selected and the planner has returned a path. The control loop walks the virtual robot along the waypoints.
+- **INTERACTING** — the goal has been reached and the arm interaction sequence is running.
+- **DONE** — the task completed successfully.
+- **FAILED** — the system gave up (no object detected, both planners failed, or similar).
+
+Transitions are logged via a `/task_status` topic so that external observers can follow the progression.
+
+## Arm Interaction Sequence
+
+On arrival at a task-driven goal, the node transitions to the INTERACTING state and executes a fixed four-step servo sequence:
+
+1. **Reach** — the arm is set to the pose `[90°, 45°, 90°, 90°, 90°, 60°]`, which orients the wrist forward and lowers the shoulder joint.
+2. **Grip close** — servo 6 (the gripper) is commanded to 30°, closing the jaws.
+3. **Lift** — servo 2 is raised to 70°, elevating the arm to carry the object.
+4. **Home** — the arm returns to the home pose `[90°, 90°, 90°, 90°, 90°, 90°]`.
+
+Each step is separated by a 1.0-1.5 second delay to allow the servos to complete their motion. The sequence is open-loop: it does not adapt its reach pose to the object's measured 3D location, and it does not verify a successful grasp. This is acknowledged as a limitation in Chapter 5.
+
+## Virtual Mover for Offline Evaluation
+
+A practical challenge in evaluating the planner is that each physical robot trial requires remote session time and coordination with the physical environment. To mitigate this, the unified node includes an in-process virtual mover that consumes the planned path and walks a simulated robot along the waypoints at a fixed speed (0.3 m/s by default), publishing fake odometry and TF at 20 Hz. This allows the full planner-to-execution pipeline — including task parsing, YOLO detection, goal selection, RRT\* planning, waypoint following, and the arm interaction sequence — to be exercised without physically moving the robot's base. The system subscribes to both `/odom` and `/odom_raw` transparently, so it works identically with real or virtual motion.
+
+A standalone virtual-mover node (`virtual_mover.py`) is also preserved in the codebase from an earlier iteration and can be used to drive the same planner-executor loop against a saved occupancy grid, without the full task-execution pipeline active.
+
+## Integration and Final Pipeline
+
+The final pipeline ties the components together. A typical execution of the task `"chair"` proceeds as follows; @fig-architecture illustrates the sensing, mapping, and planning core that underlies every task.
+
+1. A user publishes `"chair"` (or a richer form the dictionary recognizes) on `/task`.
+2. The task callback matches the string to the label list `["chair"]` and transitions the state machine from IDLE to SCANNING.
+3. The arm's base servo is commanded to 45°, a frame is captured, YOLOv8 is run at confidence 0.40, and detected class labels are checked against `["chair"]`. The process repeats at 90° and 135°.
+4. The best-confidence chair detection across the three sweep positions is selected. Its normalized horizontal center and the servo angle are used to compute a world bearing, and the LiDAR range at that bearing provides an estimated distance. Together these yield an estimated $(x_\text{obj}, y_\text{obj})$.
+5. The state machine transitions to NAVIGATING. The estimated position is passed to RRT\*, which returns a path; if RRT\* fails, A\* is invoked on the same occupancy grid.
+6. The path is published on `/planned_path`. The in-node virtual mover walks waypoint-by-waypoint at 0.3 m/s, publishing `/odom_raw` and broadcasting the `map → base_footprint` transform at 20 Hz.
+7. When the robot reaches within 0.30 m of the final waypoint the state machine transitions to INTERACTING and executes the four-step arm sequence (reach → grip close → lift → home).
+8. The state machine transitions to DONE and a completion message is published on `/task_status`.
+
+Each figure referenced in this chapter has a numbered caption beneath it so that it can be referenced from the text using Quarto's cross-reference syntax.

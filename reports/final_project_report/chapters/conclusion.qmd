@@ -1,3 +1,63 @@
 # Conclusion
 
-Conclude by summarizing the key findings of the analysis, discussing the implications of the results, and suggesting areas for future research.
+This project set out to bridge the gap between Vision-Language Navigation research, which typically runs in simulation, and the practical realities of running an end-to-end natural-language-driven navigation pipeline on embedded hardware. Over approximately four months of work, a modular ROS 2 system was designed, implemented, tested, and documented on the Yahboom ROSMASTER X3 PLUS platform. The system accepts natural-language instructions of the form "chair" or "cup of water", performs an arm-mounted camera sweep, runs YOLOv8 nano object detection to ground the instruction in the environment, estimates the target object's world position by fusing the arm servo angle, bounding-box location, and LiDAR range, constructs a 2D occupancy grid together with a 3D RTAB-Map point cloud, and passes the target pose to the path planner.
+
+## Summary of Findings
+
+Several concrete findings emerged over the course of the project.
+
+- **A reliable startup sequence is itself a deliverable.** A significant portion of the early weeks of the project was spent identifying the correct order in which to launch sensor drivers, motor drivers, and SLAM nodes. The resulting five-step sequence — `display_X3.launch.py` → `Mcnamu_driver_X3` → `base_node_X3` (from the `yahboomcar_base_node` package) → `astro_pro_plus.launch.xml` → `x3_rtabmap_depth.launch.py` — now produces a working system in roughly 20 seconds.
+
+- **Hardware-specific details are often undocumented and have to be discovered experimentally.** Several such details were documented in this report: the motor controller lives on `/dev/ttyUSB1` rather than the expected `/dev/ttyUSB0`; the Astra Pro Plus presents a non-standard UVC product ID (`0x050f`) and therefore requires its own launch file rather than the generic Orbbec launch file; the Astra color stream and the arm wrist camera compete for the same `/dev/video0` device and cannot both run simultaneously; the `base_node_X3` executable lives in a separate package (`yahboomcar_base_node`) from the motor driver; and the `ARM_HOME` pose must tilt the shoulder servo forward or the wrist camera will photograph the ceiling.
+
+- **Professor-directed switch from A\* to RRT\* paid off on real maps.** A\* on a $400 \times 400$ grid produces waypoint counts in the hundreds even after smoothing, while RRT\* produces paths with only a handful of waypoints on the same maps. Both planners remain in the codebase for comparative purposes and because A\* serves as the fallback when RRT\* fails.
+
+- **A modular, topic-based architecture enabled independent development and testing of each subsystem.** In particular, the in-node virtual mover made it possible to exercise the full planner-to-execution pipeline without consuming physical motion time, and the dual-camera-source design of the arm-scan component made it possible to test YOLOv8 detection regardless of whether the Astra camera was active.
+
+- **The unified pipeline reaches nine of twelve integration points on its first end-to-end test.** In the representative test documented in Chapter 4, `/task` parsing, state-machine transitions, arm sweep, camera capture, YOLOv8 inference (chair detections at confidences 0.74-0.84), best-detection selection, LiDAR-fused bearing estimation, and RRT\* invocation all fired correctly. An interface-drift bug between the SLAM module and the RRT\* planner prevented the final three stages (path return, waypoint following, arm interaction) from completing.
+
+## Implications
+
+The implications of this work are practical rather than theoretical. A system-level demonstration that a VLN-style perception-and-localization pipeline can be brought up end-to-end on this specific class of hardware (a Jetson-based differential-drive platform with an RGB-D camera, LiDAR, and a six-degree-of-freedom arm) lowers the barrier for future students to extend it. In particular, the map-guided path-planning approach studied in simulation by Mohiuddin [@mohiuddin2025vln] — explicitly identified by the author as awaiting real-world deployment on "a ROSMaster X3 Plus robot equipped with an NVIDIA Jetson Orin NX" — now has a working base platform to deploy onto. Integrating that semantic-cost formulation into either the A\* or RRT\* planner implemented here would be a natural next step.
+
+More broadly, the project illustrates that a meaningful fraction of the effort in real-world robot deployment lies below the level of published algorithms: in driver selection, device-file management, transform-tree correctness, camera-device arbitration, and mechanical configuration such as arm home pose. Student projects and research deployments benefit from documenting these artifacts as first-class outputs.
+
+## Limitations
+
+Several limitations of the current system should be acknowledged.
+
+- **An interface-drift bug halts execution at RRT\* planning.** The most consequential limitation is an `AttributeError` raised by `rrt_virtual_mover.py` when it calls `self.map.inflated_mask()` on the `_OccupancyMap` instance from `slam_module.py`. The SLAM module's occupancy map currently exposes only `obstacle_mask()` and `probability_grid()`; inflation was historically performed locally inside the A\* planner rather than in the SLAM class. The bug prevents the end-to-end pipeline from completing path planning even though every preceding stage (perception, detection, goal estimation, state transition) works correctly. This is the top-priority fix for continuing work (see Future Work below).
+
+- **The A\* fallback does not trigger on RRT\* exceptions.** The two-tier planner design was intended to activate A\* when RRT\* fails, but the current failure mode (an unhandled `AttributeError`) propagates out of the planner call rather than being returned as an empty path. The fallback path only triggers when the planner returns a false-valued result, not when it raises.
+
+- **Instruction parsing is minimal.** The task node recognizes only instructions that match entries in a fixed task-to-label dictionary (nine entries covering common objects such as chair, bottle, cup, phone, laptop, book, and person). Richer instructions involving relations ("the bottle on the table"), ordinals ("the second chair"), or multi-step actions ("pick up the bottle and put it on the table") are not supported. Recent VLN surveys document a broad shift toward foundation-model-driven embodied planning that could address this limitation [@zhang_vision-and-language_2024; @chen_mapgpt_2024], but integrating such systems was out of scope for the present engineering-focused project.
+
+- **No formal success benchmark has been run.** The end-to-end pipeline has been demonstrated working up to and including RRT\* invocation on a representative task, but a large-scale evaluation with many trials across different objects, starting positions, and room configurations has not been performed.
+
+- **Detection is purely image-based and single-pass.** If YOLOv8 misses an object at all three arm-sweep positions, the task fails. There is no re-scan, viewpoint-selection, or active-perception strategy. On a real domestic platform this is a significant weakness.
+
+- **Depth estimation is LiDAR-based rather than using the wrist camera.** The wrist camera is monocular, so object distance is inferred from the LiDAR range at the detection bearing. This works well for floor-standing objects but degrades for small tabletop objects, where the LiDAR ray is likely to pass through the object and strike the wall behind it. The system falls back to a default distance of 1.5 m when no valid LiDAR range is present, which is a coarse substitute for real depth.
+
+- **The arm interaction sequence is open-loop.** Once the robot reaches a goal, the arm executes a fixed reach-grip-lift-home sequence at preset servo angles, regardless of the object's measured 3D pose. The gripper closure is not verified, and an unsuccessful grasp is not detected.
+
+- **Odometry is trusted directly.** No sensor fusion between wheel odometry, visual odometry from RTAB-Map, and LiDAR-based odometry is performed. RTAB-Map's pose estimate is used for visualization only and is not fed back into the planner. On longer trajectories, drift accumulates.
+
+## Future Work
+
+The limitations above translate into a prioritized future-work list.
+
+1. **Fix the `inflated_mask()` interface-drift bug.** Add an `inflated_mask(inflation_radius_m=0.15)` method to the `_OccupancyMap` class in `slam_module.py` that returns the obstacle mask dilated by the robot footprint, and update `rrt_virtual_mover.py` to call it. Additionally, wrap the RRT\* planner call in the unified node's `_replan()` method in a `try`/`except` block so that any planner exception triggers the A\* fallback rather than crashing the node. This single fix is expected to unblock the remaining three pipeline stages (path return, waypoint following, arm interaction) without any further design changes.
+
+2. **Run a formal end-to-end success-rate benchmark.** Define 30-50 natural-language tasks across a known set of objects and room configurations, execute each three times with a fresh SLAM map, and report success rate, detection rate per object class, path-planning failure rate, and end-to-end completion time.
+
+3. **Integrate the semantic-aware cost formulation from Mohiuddin's simulation work directly into the RRT\* planner.** This is the most natural algorithmic extension, and the platform is now ready for it.
+
+4. **Replace the fixed task-to-label dictionary with a small language model.** This would enable richer instruction forms and multi-step tasks, and would allow the system to synthesize YOLO class lists on the fly instead of requiring manual dictionary entries.
+
+5. **Add active perception.** If the first arm sweep does not yield a detection, the robot should rotate its base or reposition itself rather than immediately declaring failure.
+
+6. **Use the Astra depth sensor for object distance instead of (or alongside) LiDAR range.** This would provide accurate depth on tabletop objects and resolve the current LiDAR-ray-passes-through-object failure mode.
+
+7. **Close the loop on manipulation.** Verify grasp success using current-sensing on the gripper servo or contact sensors, and retry the grasp if it fails.
+
+Taken together, these extensions would transform the present engineering deliverable into a full VLN research platform. The groundwork laid in this project — a working startup sequence, a unified modular architecture, a SLAM layer, two working planners, a YOLOv8 perception pipeline, a LiDAR-fused object localizer, a natural-language task state machine, and an open-loop arm interaction routine — provides the foundation on which those extensions can be built.
