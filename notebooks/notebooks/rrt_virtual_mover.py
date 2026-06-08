@@ -763,14 +763,15 @@ class QuadRRTPlanner:
         wy_min = self.map.origin_y
         wy_max = self.map.origin_y + self.map.h * self.map.res
 
-        nodes = [RRTNode(sx, sy, parent=None, cost=0.0)]
+        nodes = [RRTNode(sx, sy, parent=None, cost=0.0,
+                 heading=math.atan2(gy - sy, gx - sx))]
         self.quadtree.insert(
         QuadTreeNode(sx, sy, 0)
         )
         goal_node_idx = None
         # ── Component 1: build grid probability table once ──
         self._init_sampling_grid(sx, sy, gx, gy, obs)
-        self._current_heading = math.atan2(gy - sy, gx - sx)  # initial heading toward goal
+        
 
         for _ in range(MAX_ITERATIONS):
             # Sample
