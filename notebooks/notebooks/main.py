@@ -183,11 +183,6 @@ class UnifiedMainNode(Node):
             resolution=0.05,
         )
         self.slam.reset()
-        
-        # ---stuck detection variables-------------------------
-        self.last_progress_time = time.time()
-        self.last_progress_x = 0.0
-        self.last_progress_y = 0.0
 
         # ---stuck detection variables-------------------------
         self.last_progress_time = time.time()
@@ -703,8 +698,6 @@ class UnifiedMainNode(Node):
                 self.vy += step * math.sin(target_yaw)
                 self.vyaw = target_yaw
                 
-                if self.metrics:
-                    self.metrics.update(self.vx, self.vy)
                 
                 # Update centralized robot state
                 self.robot_state.update(
@@ -713,10 +706,6 @@ class UnifiedMainNode(Node):
                     self.vyaw
                 )
                 
-                # keep SLAM pose synchronized
-                self.slam_pose.x = self.vx
-                self.slam_pose.y = self.vy
-                self.slam_pose.yaw = self.vyaw
                 self._latest_action = "forward"
 
                 # Feed virtual pose back to SLAM as synthetic odometry
@@ -955,83 +944,6 @@ class UnifiedMainNode(Node):
         return float(np.sum(
             np.linalg.norm(np.diff(pts, axis=0), axis=1)))
         
-    
-    # Visualization through a graph    
-    def visualize_navigation(self):
-
-        if not self.waypoints:
-            return
-    
-        plt.figure(figsize=(10, 10))
-    
-        grid = self.slam._map.log_odds > 2.0
-    
-        extent = [
-            self.slam._map.origin_x,
-            self.slam._map.origin_x +
-            (self.slam._map.w * self.slam._map.res),
-            self.slam._map.origin_y,
-            self.slam._map.origin_y +
-            (self.slam._map.h * self.slam._map.res)
-        ]
-    
-        plt.imshow(
-            grid.T.astype(float),
-            origin='lower',
-            cmap='gray_r',
-            interpolation='nearest',
-            extent=extent
-        )
-        
-        # waypoint markers
-        for i, (wx, wy) in enumerate(self.waypoints):
-            plt.plot(wx, wy, 'ro')
-            plt.text(wx, wy, str(i))
-    
-        # Robot
-        plt.plot(
-            self.vx,
-            self.vy,
-            'bo',
-            markersize=10,
-            label='Robot'
-        )
-    
-        # Goal
-        if self.goal:
-            plt.plot(
-                self.goal[0],
-                self.goal[1],
-                'rx',
-                markersize=12,
-                label='Goal'
-            )
-    
-        # Path
-        px = []
-        py = []
-    
-        for wx, wy in self.waypoints:
-            px.append(wx)
-            py.append(wy)
-    
-        plt.plot(
-            px,
-            py,
-            'g-',
-            linewidth=2,
-            label='Path'
-        )
-    
-        plt.xlabel("X (m)")
-        plt.ylabel("Y (m)")
-        plt.title(
-            f"{self.active_planner.upper()} Navigation"
-        )
-        plt.legend()
-        plt.grid(True)
-    
-        plt.show()
 
     # Visualization through a graph
 
