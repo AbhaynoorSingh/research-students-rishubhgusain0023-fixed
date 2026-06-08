@@ -1,0 +1,41 @@
+# Introduction
+
+## Overview
+
+Autonomous indoor navigation has moved steadily from a laboratory curiosity to a realistic capability for consumer and service robots. Much of this progress has been driven by three parallel developments: increasingly capable sensors at low unit cost, open-source robotics middleware such as the Robot Operating System (ROS), and the rise of Vision-Language Navigation (VLN) as a research area that treats natural-language instructions as first-class inputs to a robot control stack [@zhang_vision-and-language_2024]. A person interacting with such a robot no longer needs to specify precise coordinates; they can instead say something close to natural language, such as "find the bottle on the table" or "go to the kitchen," and expect the robot to interpret the request, identify what it refers to, and carry out an appropriate motion plan.
+
+Despite the rapid progress of VLN research, a substantial gap remains between what is demonstrated in simulation and what can be reliably executed on physical hardware. The vast majority of published VLN systems are evaluated on benchmarks such as Room-to-Room and Matterport3D, which operate on pre-recorded panoramic image graphs rather than live sensor data. A growing body of recent work has begun to push toward real-world deployment, but doing so exposes a long list of practical issues that simulation papers can safely ignore: motor-controller port assignments, camera device contention, transform-tree broken-ness, firmware quirks, inconsistent start-up sequences, and the simple problem that two nodes sometimes cannot share the same USB device.
+
+This project was positioned within that gap. Rather than proposing a new algorithm or training a new learned model, its goal was to **design, build, and validate an end-to-end VLN-style navigation stack that actually runs on a physical embedded robot**. The platform chosen for this was the Yahboom ROSMASTER X3 PLUS, a four-wheeled Mecanum-drive robot equipped with a 360-degree LiDAR, an Orbbec Astra Pro Plus RGB-D camera, a six-degree-of-freedom arm with a wrist-mounted camera, and an NVIDIA Jetson computer running Ubuntu 22.04 and ROS 2 Humble. All work was performed remotely over RustDesk.
+
+### Existing System
+
+When the project began, the robot had been powered on and a factory image was present on the Jetson, but there was no end-to-end pipeline capable of accepting a natural-language task and executing it. Several pieces existed in isolation: Yahboom provided a C++ driver node (`Mcnamu_driver_X3`) that accepts `/cmd_vel` messages and translates them into motor commands, a `base_node_X3` node that publishes odometry, and example launch files for the various sensors. However, the following were missing or non-functional:
+
+- A reliable, documented startup sequence to bring up all sensors and drivers in the correct order.
+- A SLAM pipeline producing both 2D occupancy maps for planning and 3D point clouds for visualization.
+- Any path planner at all — nothing in the default image consumes an occupancy grid and produces a navigable path.
+- A bridge between a natural-language instruction and the motion stack.
+- Any object-detection component capable of grounding a language instruction in the environment.
+
+A parallel research project within the same lab — a simulation-only study of semantic-aware path planning for VLN by Mohiuddin [@mohiuddin2025vln] — had identified real-world deployment as an explicit future-work direction, noting that their framework would require "live camera feeds published over ROS topics, real-time localization using odometry or SLAM, and continuous motion control through velocity commands." The present project was conceived in part to tackle exactly that transition on an actual robot.
+
+Recent work has shown that map-guided prompting with adaptive path planning can improve instruction-following in continuous VLN environments [@chen_mapgpt_2024], but these systems typically assume the presence of a working low-level navigation stack. Early demonstrations of ROS-based indoor mapping and autonomous navigation showed that integrating sensor drivers, localization, and motion planning into a single middleware framework is non-trivial even for simpler platforms [@zaman_ros-based_2011]. The present project focuses on building that lower-level stack — the sensing, mapping, planning, and execution layers — rather than on the upper-layer language model.
+
+## Objectives of the Project
+
+The project was guided by four concrete objectives, each of which is revisited in later chapters of this report.
+
+**Objective 1: Bring up a reliable hardware and sensing baseline on the ROSMASTER X3 PLUS.**  
+This includes identifying the correct startup sequence, resolving any device-driver issues, and confirming that the LiDAR, RGB-D camera, arm camera, and motors all produce and accept the expected ROS 2 topics.
+
+**Objective 2: Implement a SLAM pipeline that produces both a 2D occupancy grid for planning and a 3D point-cloud map for visualization and verification.**  
+The 2D map is used by the path planner; the 3D map gives a human-readable representation of the environment that confirms the robot is mapping correctly.
+
+**Objective 3: Implement and compare at least two path planners on the same SLAM-generated maps.**  
+An A\* grid planner was developed first as a baseline, and an RRT\* sampling-based planner was developed afterwards on supervisor guidance. Both planners are retained in the codebase, and the report compares them on waypoint count, path length, and planning time.
+
+**Objective 4: Connect a natural-language interface to the planning stack through an object-detection module and a task-level state machine.**  
+The robot must be able to accept a text instruction of the form "find the \<object\>", use its arm-mounted camera to scan the environment, run YOLOv8 object detection to locate a match, and drive to the detected object.
+
+The remainder of this report is organized as follows. Chapter 2 characterizes the hardware platform and the sensor and topic landscape that had to be understood before any higher-level code could be written. Chapter 3 describes the methodology, including the SLAM module, both path planners, the arm-camera scan routine, and the task state machine. Chapter 4 presents results, including the outcomes of end-to-end testing on real hardware and per-subsystem verification. Chapter 5 concludes with a discussion of limitations and a prioritized list of future work.

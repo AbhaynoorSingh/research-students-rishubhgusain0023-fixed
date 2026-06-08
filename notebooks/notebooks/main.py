@@ -32,10 +32,11 @@ import os
 import sys
 import time
 import numpy as np
+import matplotlib.pyplot as plt
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import (QoSProfile, QoSReliabilityPolicy,
-                        QoSHistoryPolicy, QoSDurabilityPolicy)
+                       QoSHistoryPolicy, QoSDurabilityPolicy)
 
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import OccupancyGrid, Path, Odometry
@@ -75,30 +76,30 @@ except ImportError:
 
 
 # ──────────────────────────── CONFIG ──────────────────────────
-ROBOT_SPEED_MPS   = 0.3     # virtual movement speed (m/s)
-WAYPOINT_TOL      = 0.10    # metres — waypoint reached threshold
-GOAL_TOL          = 0.30    # metres — goal reached threshold
-PUBLISH_HZ        = 20.0    # control loop rate
-REPLAN_EVERY_N    = 20      # replan every N scans
-REPLAN_COOLDOWN   = 2.0     # seconds between replans
+ROBOT_SPEED_MPS = 0.3     # virtual movement speed (m/s)
+WAYPOINT_TOL = 0.10    # metres — waypoint reached threshold
+GOAL_TOL = 0.30    # metres — goal reached threshold
+PUBLISH_HZ = 20.0    # control loop rate
+REPLAN_EVERY_N = 20      # replan every N scans
+REPLAN_COOLDOWN = 2.0     # seconds between replans
 SIMULATION_MODE = True
 
 # Camera / arm scan
-SCAN_POSITIONS    = [45, 90, 135]   # servo 1 angles for visual scan
-MOVE_DELAY        = 1.5             # seconds to wait after servo move
-CAM_INDEX         = 1               # OpenCV device index
-CAM_HFOV_DEG      = 60.0           # horizontal FOV of camera (degrees)
-SAVE_DIR          = os.path.expanduser("~/scan_images")
+SCAN_POSITIONS = [45, 90, 135]   # servo 1 angles for visual scan
+MOVE_DELAY = 1.5             # seconds to wait after servo move
+CAM_INDEX = 1               # OpenCV device index
+CAM_HFOV_DEG = 60.0           # horizontal FOV of camera (degrees)
+SAVE_DIR = os.path.expanduser("~/scan_images")
 
 # Arm positions
-ARM_HOME          = [90, 115, 25, 45, 90, 90]   # all servos home
-ARM_REACH         = [90, 45, 90, 90, 90, 60]   # reach forward
-ARM_GRIP_CLOSE    = 30   # servo 6 angle to close grip
-ARM_GRIP_OPEN     = 90   # servo 6 angle to open grip
+ARM_HOME = [90, 115, 25, 45, 90, 90]   # all servos home
+ARM_REACH = [90, 45, 90, 90, 90, 60]   # reach forward
+ARM_GRIP_CLOSE = 30   # servo 6 angle to close grip
+ARM_GRIP_OPEN = 90   # servo 6 angle to open grip
 
 # YOLO
-YOLO_MODEL        = "yolov8n.pt"    # nano = fastest on Jetson
-YOLO_CONF         = 0.40            # minimum confidence threshold
+YOLO_MODEL = "yolov8n.pt"    # nano = fastest on Jetson
+YOLO_CONF = 0.40            # minimum confidence threshold
 
 # Task to YOLO label mapping — add more tasks here as needed
 TASK_LABEL_MAP = {
@@ -127,12 +128,14 @@ def quat_from_yaw(yaw: float) -> Quaternion:
 #  Task state machine
 # ══════════════════════════════════════════════════════════════
 class TaskState:
-    IDLE        = "idle"
-    SCANNING    = "scanning"
-    NAVIGATING  = "navigating"
+    IDLE = "idle"
+    SCANNING = "scanning"
+    PLANNING = "planning"
+    NAVIGATING = "navigating"
     INTERACTING = "interacting"
-    DONE        = "done"
-    FAILED      = "failed"
+    DONE = "done"
+    FAILED = "failed"
+
 
 class RobotState:
     """
@@ -156,6 +159,8 @@ class RobotState:
 # ══════════════════════════════════════════════════════════════
 #  Main unified node
 # ══════════════════════════════════════════════════════════════
+
+
 class UnifiedMainNode(Node):
     """
     ROS2 node integrating:
@@ -173,44 +178,49 @@ class UnifiedMainNode(Node):
 
         # ── SLAM ─────────────────────────────────────────────
         self.slam = SLAMModule(
-            width_m    = 20.0,
-            height_m   = 20.0,
-            resolution = 0.05,
+            width_m=20.0,
+            height_m=20.0,
+            resolution=0.05,
         )
         self.slam.reset()
 
+        # ---stuck detection variables-------------------------
+        self.last_progress_time = time.time()
+        self.last_progress_x = 0.0
+        self.last_progress_y = 0.0
+
         # ── Planners ─────────────────────────────────────────
-        self.rrt_planner   = RRTPlanner(self.slam._map)
+        self.rrt_planner = RRTPlanner(self.slam._map)
         self.astar_planner = GridPathPlanner(
             self.slam._map, inflation_radius_m=0.15)
 
         # ── Navigation state ─────────────────────────────────
-        self.waypoints      = []
-        self.wp_index       = 0
-        self.is_moving      = False
-        self.goal           = None
-        self.metrics        = None
+        self.waypoints = []
+        self.wp_index = 0
+        self.is_moving = False
+        self.goal = None
+        self.metrics = None
         self.active_planner = "none"
 
         # ── Centralized robot state ──────────────────────────
         self.robot_state = RobotState()
 
         # Virtual pose mirrors robot_state in simulation mode
-        self.vx   = 0.0
-        self.vy   = 0.0
+        self.vx = 0.0
+        self.vy = 0.0
         self.vyaw = 0.0
 
         # ── Sensor cache ─────────────────────────────────────
-        self._latest_scan   = None
-        self._latest_odom   = None
+        self._latest_scan = None
+        self._latest_odom = None
         self._latest_action = "idle"
-        self._scan_count    = 0
-        self._last_replan   = 0.0
+        self._scan_count = 0
+        self._last_replan = 0.0
 
         # ── Task state ────────────────────────────────────────
-        self.task_state          = TaskState.IDLE
-        self.current_task        = None
-        self.target_labels       = []
+        self.task_state = TaskState.IDLE
+        self.current_task = None
+        self.target_labels = []
         self.detected_object_pos = None   # (world_x, world_y)
 
         # ── Camera ───────────────────────────────────────────
@@ -267,10 +277,10 @@ class UnifiedMainNode(Node):
 
         # ── QoS ──────────────────────────────────────────────
         sensor_qos = QoSProfile(
-            reliability = QoSReliabilityPolicy.BEST_EFFORT,
-            history     = QoSHistoryPolicy.KEEP_LAST,
-            depth       = 10,
-            durability  = QoSDurabilityPolicy.VOLATILE,
+            reliability=QoSReliabilityPolicy.BEST_EFFORT,
+            history=QoSHistoryPolicy.KEEP_LAST,
+            depth=10,
+            durability=QoSDurabilityPolicy.VOLATILE,
         )
 
         # ── Subscribers ──────────────────────────────────────
@@ -286,17 +296,17 @@ class UnifiedMainNode(Node):
             String,    '/task',     self._task_cb,  10)
 
         # ── Publishers ───────────────────────────────────────
-        self.map_pub    = self.create_publisher(
+        self.map_pub = self.create_publisher(
             OccupancyGrid, '/map',             10)
-        self.path_pub   = self.create_publisher(
+        self.path_pub = self.create_publisher(
             Path,          '/planned_path',    10)
-        self.pose_pub   = self.create_publisher(
+        self.pose_pub = self.create_publisher(
             PoseStamped,   '/slam_pose',       10)
-        self.vpose_pub  = self.create_publisher(
+        self.vpose_pub = self.create_publisher(
             PoseStamped,   '/virtual_pose',    10)
         self.cmdvel_pub = self.create_publisher(
             Twist,         '/virtual_cmd_vel', 10)
-        self.odom_pub   = self.create_publisher(
+        self.odom_pub = self.create_publisher(
             Odometry,      '/odom_raw',        10)
         self.status_pub = self.create_publisher(
             String,        '/task_status',     10)
@@ -342,11 +352,15 @@ class UnifiedMainNode(Node):
         self.goal = (msg.x, msg.y)
         self.get_logger().info(
             f"[GOAL] Raw goal: ({msg.x:.2f}, {msg.y:.2f})")
-        x, y, _ = self.slam.pose
+        if SIMULATION_MODE:
+            x, y = self.vx, self.vy
+        else:
+            x, y, _ = self.slam.pose
         self.metrics = NavigationMetrics(
             msg.x, msg.y, tolerance_m=GOAL_TOL)
         self.metrics.update(x, y)
         self.task_state = TaskState.NAVIGATING
+        
         self._replan()
 
     def _task_cb(self, msg: String):
@@ -370,9 +384,9 @@ class UnifiedMainNode(Node):
             self._publish_status(f"Unknown task: {task}")
             return
 
-        self.current_task        = task
-        self.target_labels       = labels
-        self.task_state          = TaskState.SCANNING
+        self.current_task = task
+        self.target_labels = labels
+        self.task_state = TaskState.SCANNING
         self.detected_object_pos = None
 
         self.get_logger().info(f"[TASK] Searching for: {labels}")
@@ -460,7 +474,7 @@ class UnifiedMainNode(Node):
             cv2.imwrite(fname, frame)
 
             # Run YOLO inference
-            results    = self.yolo(frame, conf=YOLO_CONF, verbose=False)
+            results = self.yolo(frame, conf=YOLO_CONF, verbose=False)
             detections = results[0].boxes
 
             if detections is None or len(detections) == 0:
@@ -470,12 +484,12 @@ class UnifiedMainNode(Node):
 
             for box in detections:
                 label_idx = int(box.cls[0])
-                label     = self.yolo.names[label_idx]
-                conf      = float(box.conf[0])
+                label = self.yolo.names[label_idx]
+                conf = float(box.conf[0])
 
                 if label in self.target_labels:
                     x1, y1, x2, y2 = box.xyxy[0].tolist()
-                    img_w   = frame.shape[1]
+                    img_w = frame.shape[1]
                     cx_norm = ((x1 + x2) / 2.0) / img_w
 
                     self.get_logger().info(
@@ -502,8 +516,8 @@ class UnifiedMainNode(Node):
         # cx_norm shifts within the camera horizontal FOV
         robot_x, robot_y, robot_yaw = self.slam.pose
 
-        servo_offset_deg  = servo_angle - 90.0
-        cam_offset_deg    = (cx_norm - 0.5) * CAM_HFOV_DEG
+        servo_offset_deg = servo_angle - 90.0
+        cam_offset_deg = (cx_norm - 0.5) * CAM_HFOV_DEG
         total_bearing_rad = (
             math.radians(servo_offset_deg + cam_offset_deg) + robot_yaw)
 
@@ -523,8 +537,8 @@ class UnifiedMainNode(Node):
             f"Found '{label}' at ({obj_x:.2f}, {obj_y:.2f})")
 
         # ── Navigate to object ────────────────────────────────
-        self.goal       = (obj_x, obj_y)
-        self.metrics    = NavigationMetrics(
+        self.goal = (obj_x, obj_y)
+        self.metrics = NavigationMetrics(
             obj_x, obj_y, tolerance_m=GOAL_TOL)
         self.metrics.update(robot_x, robot_y)
         self.task_state = TaskState.NAVIGATING
@@ -542,8 +556,10 @@ class UnifiedMainNode(Node):
         _, _, ryaw = self.slam.pose
 
         rel = bearing_rad - ryaw
-        while rel >  math.pi: rel -= 2 * math.pi
-        while rel < -math.pi: rel += 2 * math.pi
+        while rel > math.pi:
+            rel -= 2 * math.pi
+        while rel < -math.pi:
+            rel += 2 * math.pi
 
         idx = int((rel - scan.angle_min) / scan.angle_increment)
         idx = max(0, min(idx, len(scan.ranges) - 1))
@@ -563,22 +579,29 @@ class UnifiedMainNode(Node):
     # ══════════════════════════════════════════════════════════
 
     def _replan(self):
+        self.task_state = TaskState.PLANNING
+
         if self.goal is None:
             return
 
-        x, y, _ = self.slam.pose
+        if SIMULATION_MODE:
+            x, y = self.vx, self.vy
+        else:
+            x, y, _ = self.slam.pose
 
         self.get_logger().info(
             f"[RRT*] Planning to ({self.goal[0]:.2f}, {self.goal[1]:.2f})")
-        t0   = time.time()
+        t0 = time.time()
         path = self.rrt_planner.plan((x, y), self.goal)
-        dt   = time.time() - t0
+        dt = time.time() - t0
 
         if path:
-            self.waypoints      = self.rrt_planner.smooth_path(path)
-            self.wp_index       = 1
-            self.is_moving      = True
+            self.task_state = TaskState.NAVIGATING
+            self.waypoints = path
+            self.wp_index = 1
+            self.is_moving = True
             self.active_planner = "rrt"
+            self.visualize_navigation()
             self.get_logger().info(
                 f"[RRT*] Found in {dt:.3f}s | "
                 f"{len(self.waypoints)} waypoints | "
@@ -586,23 +609,26 @@ class UnifiedMainNode(Node):
         else:
             self.get_logger().warn(
                 f"[RRT*] Failed ({dt:.3f}s) — falling back to A*")
-            rx, ry   = self.slam._map.world_to_cell(x, y)
+            rx, ry = self.slam._map.world_to_cell(x, y)
             raw_path = self.astar_planner.plan(
                 (x, y), self.goal, rx, ry)
 
             if raw_path:
-                self.waypoints      = self.astar_planner.smooth_path(raw_path)
-                self.wp_index       = 1
-                self.is_moving      = True
+                self.task_state = TaskState.NAVIGATING
+                self.waypoints = raw_path
+                self.wp_index = 1
+                self.is_moving = True
                 self.active_planner = "astar"
+                self.visualize_navigation()
                 self.get_logger().info(
-                    f"[A*] Fallback | "
-                    f"{len(self.waypoints)} waypoints | "
-                    f"{self._path_length():.2f}m")
+                    f"[RRT*] Found in {dt:.3f}s | "
+                    f"Waypoints: {len(self.waypoints)} | "
+                    f"Path Length: {self._path_length():.2f}m"
+                )
             else:
                 self.get_logger().error(
                     "Both RRT* and A* failed. Cannot navigate.")
-                self.is_moving  = False
+                self.is_moving = False
                 self.task_state = TaskState.FAILED
                 self._publish_status("Navigation failed: no path found")
                 return
@@ -621,9 +647,9 @@ class UnifiedMainNode(Node):
                 and self.wp_index < len(self.waypoints)):
 
             tx, ty = self.waypoints[self.wp_index]
-            dx     = tx - self.vx
-            dy     = ty - self.vy
-            dist   = math.hypot(dx, dy)
+            dx = tx - self.vx
+            dy = ty - self.vy
+            dist = math.hypot(dx, dy)
 
             if dist < WAYPOINT_TOL:
                 self.wp_index += 1
@@ -639,9 +665,9 @@ class UnifiedMainNode(Node):
             else:
                 target_yaw = math.atan2(dy, dx)
                 step = min(ROBOT_SPEED_MPS / PUBLISH_HZ, dist)
-                self.vx   += step * math.cos(target_yaw)
-                self.vy   += step * math.sin(target_yaw)
-                self.vyaw  = target_yaw
+                self.vx += step * math.cos(target_yaw)
+                self.vy += step * math.sin(target_yaw)
+                self.vyaw = target_yaw
                 # Update centralized robot state
                 self.robot_state.update(
                     self.vx,
@@ -649,15 +675,25 @@ class UnifiedMainNode(Node):
                     self.vyaw
                 )
                 self._latest_action = "forward"
-                
+
+                # Feed virtual pose back to SLAM as synthetic odometry
+                synthetic_odom = Odometry()
+                synthetic_odom.header.stamp = self.get_clock().now().to_msg()
+                synthetic_odom.header.frame_id = "map"
+                synthetic_odom.child_frame_id = "base_footprint"
+                synthetic_odom.pose.pose.position.x = self.vx
+                synthetic_odom.pose.pose.position.y = self.vy
+                synthetic_odom.pose.pose.orientation = quat_from_yaw(self.vyaw)
+                self._latest_odom = synthetic_odom
+
                 if self.metrics and SIMULATION_MODE:
                     self.metrics.update(
                         self.robot_state.x,
                         self.robot_state.y
                     )
-                
+
                 twist = Twist()
-                twist.linear.x  = ROBOT_SPEED_MPS
+                twist.linear.x = ROBOT_SPEED_MPS
                 twist.angular.z = 0.0
                 self.cmdvel_pub.publish(twist)
 
@@ -669,11 +705,11 @@ class UnifiedMainNode(Node):
     # ══════════════════════════════════════════════════════════
 
     def _on_goal_reached(self):
-        self.is_moving      = False
+        self.is_moving = False
         self._latest_action = "idle"
         self.cmdvel_pub.publish(Twist())
 
-        goal   = self.waypoints[-1] if self.waypoints else self.goal
+        goal = self.waypoints[-1] if self.waypoints else self.goal
         length = self._path_length()
 
         self.get_logger().info(
@@ -700,11 +736,11 @@ class UnifiedMainNode(Node):
             self.task_state = TaskState.DONE
             self._publish_status("Goal reached.")
 
-        self.metrics        = None
-        self.goal           = None
-        self.waypoints      = []
+        self.metrics = None
+        self.goal = None
+        self.waypoints = []
         self.active_planner = "none"
-        self.current_task   = None
+        self.current_task = None
 
     # ══════════════════════════════════════════════════════════
     #  Arm interaction — reach, grip, lift, home
@@ -775,20 +811,20 @@ class UnifiedMainNode(Node):
         if not self.waypoints:
             return
         path_msg = Path()
-        path_msg.header.stamp    = self.get_clock().now().to_msg()
+        path_msg.header.stamp = self.get_clock().now().to_msg()
         path_msg.header.frame_id = "map"
         for wx, wy in self.waypoints:
             ps = PoseStamped()
             ps.header = path_msg.header
-            ps.pose.position.x  = wx
-            ps.pose.position.y  = wy
+            ps.pose.position.x = wx
+            ps.pose.position.y = wy
             ps.pose.orientation = quat_from_yaw(0.0)
             path_msg.poses.append(ps)
         self.path_pub.publish(path_msg)
 
     def _publish_slam_pose(self, x, y, yaw):
         msg = PoseStamped()
-        msg.header.stamp    = self.get_clock().now().to_msg()
+        msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = "map"
         msg.pose.position.x = x
         msg.pose.position.y = y
@@ -797,7 +833,7 @@ class UnifiedMainNode(Node):
 
     def _publish_virtual_pose(self, stamp):
         msg = PoseStamped()
-        msg.header.stamp    = stamp
+        msg.header.stamp = stamp
         msg.header.frame_id = "map"
         msg.pose.position.x = self.vx
         msg.pose.position.y = self.vy
@@ -806,22 +842,22 @@ class UnifiedMainNode(Node):
 
     def _publish_virtual_odom(self, stamp):
         msg = Odometry()
-        msg.header.stamp    = stamp
+        msg.header.stamp = stamp
         msg.header.frame_id = "map"
-        msg.child_frame_id  = "base_footprint"
-        msg.pose.pose.position.x  = self.vx
-        msg.pose.pose.position.y  = self.vy
+        msg.child_frame_id = "base_footprint"
+        msg.pose.pose.position.x = self.vx
+        msg.pose.pose.position.y = self.vy
         msg.pose.pose.orientation = quat_from_yaw(self.vyaw)
-        msg.twist.twist.linear.x  = (
+        msg.twist.twist.linear.x = (
             ROBOT_SPEED_MPS if self.is_moving else 0.0)
         self.odom_pub.publish(msg)
 
     def _broadcast_tf(self):
         now = self.get_clock().now().to_msg()
         t = TransformStamped()
-        t.header.stamp    = now
+        t.header.stamp = now
         t.header.frame_id = "map"
-        t.child_frame_id  = "base_footprint"
+        t.child_frame_id = "base_footprint"
         t.transform.translation.x = self.vx
         t.transform.translation.y = self.vy
         t.transform.translation.z = 0.0
@@ -840,6 +876,85 @@ class UnifiedMainNode(Node):
         pts = np.array(self.waypoints)
         return float(np.sum(
             np.linalg.norm(np.diff(pts, axis=0), axis=1)))
+
+    # Visualization through a graph
+
+    def visualize_navigation(self):
+
+        if not self.waypoints:
+            return
+
+        plt.figure(figsize=(10, 10))
+
+        grid = self.slam._map.obstacle_mask()
+
+        extent = [
+            self.slam._map.origin_x,
+            self.slam._map.origin_x +
+            (self.slam._map.w * self.slam._map.res),
+            self.slam._map.origin_y,
+            self.slam._map.origin_y +
+            (self.slam._map.h * self.slam._map.res)
+        ]
+
+        plt.imshow(
+            grid.T.astype(float),
+            origin='lower',
+            cmap='gray_r',
+            interpolation='nearest',
+            extent=extent
+        )
+
+        # waypoint markers
+        for i, (wx, wy) in enumerate(self.waypoints):
+            plt.plot(wx, wy, 'ro')
+            plt.text(wx, wy, str(i))
+
+        # Robot
+        plt.plot(
+            self.vx,
+            self.vy,
+            'bo',
+            markersize=10,
+            label='Robot'
+        )
+
+        # Goal
+        if self.goal:
+            plt.plot(
+                self.goal[0],
+                self.goal[1],
+                'rx',
+                markersize=12,
+                label='Goal'
+            )
+
+        # Path
+        px = []
+        py = []
+
+        for wx, wy in self.waypoints:
+            px.append(wx)
+            py.append(wy)
+
+        plt.plot(
+            px,
+            py,
+            'g-',
+            linewidth=2,
+            label='Path'
+        )
+        
+        
+        plt.xlabel("X (m)")
+        plt.ylabel("Y (m)")
+        plt.title(
+            f"{self.active_planner.upper()} Navigation"
+        )
+        plt.legend()
+        plt.grid(True)
+
+        plt.show()
 
     # ══════════════════════════════════════════════════════════
     #  Cleanup

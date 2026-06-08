@@ -63,7 +63,7 @@ MAX_ITERATIONS   = 5000    # max RRT iterations before giving up
 STEP_SIZE        = 0.30    # metres per RRT extension step
 GOAL_BIAS        = 0.30    # probability of sampling goal directly
 GOAL_TOLERANCE   = 0.30    # metres — goal reached threshold
-INFLATION_M      = 0.20    # obstacle inflation radius (robot radius)
+INFLATION_M      = 0.30    # obstacle inflation radius (robot radius)
 USE_RRT_STAR     = True    # True = RRT* (rewiring for shorter paths)
 RRT_STAR_RADIUS  = 1.0     # rewiring search radius for RRT*
 
@@ -276,11 +276,13 @@ class RRTPlanner:
             return []
 
         path = self._extract_path(nodes, goal_node_idx)
-        # Step 1: averaging smooth
+        
+        # Step 1: shortcut smooth 
+        path = self.shortcut_smooth(path)
+        
+        # Step 2: averaging smooth
         path = self.smooth_path(path)
 
-        # Step 2: shortcut smooth (NEW)
-        path = self.shortcut_smooth(path)
         elapsed = time.time() - start_time
         print(f"[RRT*] Time: {elapsed:.3f}s | Nodes: {len(nodes)}")
 
@@ -380,18 +382,22 @@ class RRTPlanner:
                         return nx, ny
         return None, None
 
-    @staticmethod
-    def smooth_path(waypoints, iterations=50):
-        """Simple path smoothing by averaging neighbours."""
+    def smooth_path(self, waypoints, iterations=50):
         if len(waypoints) < 3:
             return waypoints
+        obs = self.map.inflated_mask()
         pts = list(waypoints)
         for _ in range(iterations):
             for i in range(1, len(pts) - 1):
-                pts[i] = (
-                    (pts[i-1][0] + pts[i][0] + pts[i+1][0]) / 3.0,
-                    (pts[i-1][1] + pts[i][1] + pts[i+1][1]) / 3.0,
-                )
+                cx = (pts[i-1][0] + pts[i][0] + pts[i+1][0]) / 3.0
+                cy = (pts[i-1][1] + pts[i][1] + pts[i+1][1]) / 3.0
+                # only move the point if new position is collision free
+                # on both connecting segments
+                if (self._collision_free(pts[i-1][0], pts[i-1][1],
+                                         cx, cy, obs) and
+                    self._collision_free(cx, cy,
+                                         pts[i+1][0], pts[i+1][1], obs)):
+                    pts[i] = (cx, cy)
         return pts
    
     def shortcut_smooth(self, path, iterations=50):
@@ -399,19 +405,24 @@ class RRTPlanner:
         if len(path) < 3:
             return path
 
-        import random
+        obs = self.map.inflated_mask()
+        # temporary check
         new_path = list(path)
 
         for _ in range(iterations):
+            if len(new_path) < 3:
+                break
             i = random.randint(0, len(new_path) - 2)
             j = random.randint(i + 1, len(new_path) - 1)
-
+        
             x1, y1 = new_path[i]
             x2, y2 = new_path[j]
-
-            if self._collision_free(x1, y1, x2, y2, self.map.inflated_mask()):
-                if j != len(new_path) - 1:
-                    new_path = new_path[:i+1] + new_path[j:]
+            
+            result = self._collision_free(x1, y1, x2, y2, obs)
+            
+            if result and j - i > 1:   # ← use result directly
+                new_path = new_path[:i+1] + new_path[j:]
+        
         return new_path
 
 # ══════════════════════════════════════════════════════════════
@@ -517,7 +528,7 @@ class RRTVirtualMoverNode(Node):
                 "Try a closer goal or check for obstacles.")
             return
 
-        self.waypoints = self.planner.smooth_path(path)
+        self.waypoints = path
         self.wp_index  = 1
         self.is_moving = True
 
