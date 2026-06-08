@@ -1128,17 +1128,12 @@ class QuadRRTPlanner:
 
 
 
-    def _rewire(self, nodes, new_idx, obs):
+    def _rewire(self, nodes, new_idx, obs, children_map):
         new_node = nodes[new_idx]
         radius   = RRT_STAR_RADIUS
         nearby   = self.quadtree.query_radius(new_node.x, new_node.y, radius)
 
-        # Build children map once — O(1) lookup vs O(n) scan
-        children = {}
-        for i, n in enumerate(nodes):
-            if n.parent is not None:
-                children.setdefault(n.parent, []).append(i)
-
+        # No longer rebuild children map here — use passed-in map
         for i in nearby:
             node = nodes[i]
             if i == new_idx or i == new_node.parent:
@@ -1148,11 +1143,17 @@ class QuadRRTPlanner:
                 continue
             new_cost = new_node.cost + d
             if new_cost < node.cost and \
-            self._collision_free(new_node.x, new_node.y, node.x, node.y, obs):
+            self._collision_free(new_node.x, new_node.y,
+                                    node.x, node.y, obs):
+                # Update children map when parent changes
+                old_parent = node.parent
+                if old_parent in children_map and i in children_map[old_parent]:
+                    children_map[old_parent].remove(i)
                 node.parent = new_idx
+                children_map.setdefault(new_idx, []).append(i)
                 self.rewire_count += 1
-                node.cost   = new_cost
-                self._update_children_costs(nodes, i, children)
+                node.cost = new_cost
+                self._update_children_costs(nodes, i, children_map)
 
     def _update_children_costs(self, nodes, parent_idx, children):
         """O(depth) BFS using pre-built children map."""
