@@ -783,6 +783,13 @@ class QuadRRTPlanner:
             nearest_idx = self.quadtree.nearest(rx, ry)[1]
             nearest     = nodes[nearest_idx]
             self._current_heading = nearest.heading
+            
+            # ── Quick pre-check with geometric steer ──
+            # Avoids running expensive APF on doomed iterations
+            px, py = self._steer(nearest.x, nearest.y, rx, ry)
+            if not self._collision_free(nearest.x, nearest.y, px, py, obs):
+                continue
+
             # Steer — Component 2: APF-guided expansion
             nx, ny, new_heading = self._apf_steer(
                 nearest.x, nearest.y,
