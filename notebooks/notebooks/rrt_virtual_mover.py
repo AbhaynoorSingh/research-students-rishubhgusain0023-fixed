@@ -914,17 +914,11 @@ class QuadRRTPlanner:
         nearest_ox  = nx
         nearest_oy  = ny
 
-        # Find closest obstacle cell — only search within APF_D0 radius
-        ncx = int((nx - self.map.origin_x) / self.map.res)
-        ncy = int((ny - self.map.origin_y) / self.map.res)
-        r_cells = int(APF_D0 / self.map.res) + 1
-        x0 = max(0, ncx - r_cells);  x1 = min(obs.shape[0], ncx + r_cells)
-        y0 = max(0, ncy - r_cells);  y1 = min(obs.shape[1], ncy + r_cells)
-        local_obs = np.argwhere(obs[x0:x1, y0:y1])
-
-        for cell in local_obs:
-            ox = (cell[0] + x0) * self.map.res + self.map.origin_x
-            oy = (cell[1] + y0) * self.map.res + self.map.origin_y
+        # Find closest obstacle cell in world coords
+        # obs_cells = np.argwhere(obs)
+        for cell in obs_cells:
+            ox = cell[0] * self.map.res + self.map.origin_x
+            oy = cell[1] * self.map.res + self.map.origin_y
             d  = math.hypot(nx - ox, ny - oy)
             if d < min_dist:
                 min_dist   = d
@@ -981,21 +975,10 @@ class QuadRRTPlanner:
         # ── 4. Repulsive forces from obstacle cells (Eq. 18–21) ──
         Frep_x   = 0.0
         Frep_y   = 0.0
+        # obs_cells = np.argwhere(obs)
+        n_obs     = max(1, len(obs_cells))
 
-        # Pre-filter: only keep obstacle cells within APF_D0 range
-        ncx = int((nx - self.map.origin_x) / self.map.res)
-        ncy = int((ny - self.map.origin_y) / self.map.res)
-        r_cells = int(APF_D0 / self.map.res) + 1
-        x0 = max(0, ncx - r_cells);  x1 = min(obs.shape[0], ncx + r_cells)
-        y0 = max(0, ncy - r_cells);  y1 = min(obs.shape[1], ncy + r_cells)
-        local_obs = np.argwhere(obs[x0:x1, y0:y1])
-        if len(local_obs) > 0:
-            local_obs[:, 0] += x0
-            local_obs[:, 1] += y0
-
-        n_obs = max(1, len(local_obs))
-
-        for cell in local_obs:
+        for cell in obs_cells:
             ox  = cell[0] * self.map.res + self.map.origin_x
             oy  = cell[1] * self.map.res + self.map.origin_y
             di  = math.hypot(nx - ox, ny - oy) + 1e-6
@@ -1111,7 +1094,8 @@ class QuadRRTPlanner:
         if best_parent is None:
             # Fall back to nearest
             best_parent = self._nearest(nodes, nx, ny)
-            best_cost = default_cost
+            p = nodes[best_parent]
+            best_cost = p.cost + math.hypot(p.x - nx, p.y - ny)
         return RRTNode(nx, ny, parent=best_parent, cost=best_cost), best_parent
 
     def _rewire(self, nodes, new_idx, obs):
@@ -1182,22 +1166,18 @@ class QuadRRTPlanner:
                         return nx, ny
         return None, None
 
-    def smooth_path(self, waypoints, iterations=50):
+    @staticmethod
+    def smooth_path(waypoints, iterations=50):
+        """Simple path smoothing by averaging neighbours."""
         if len(waypoints) < 3:
             return waypoints
-        obs = self.map.inflated_mask()
         pts = list(waypoints)
         for _ in range(iterations):
             for i in range(1, len(pts) - 1):
-                cx = (pts[i-1][0] + pts[i][0] + pts[i+1][0]) / 3.0
-                cy = (pts[i-1][1] + pts[i][1] + pts[i+1][1]) / 3.0
-                # only move the point if new position is collision free
-                # on both connecting segments
-                if (self._collision_free(pts[i-1][0], pts[i-1][1],
-                                         cx, cy, obs) and
-                    self._collision_free(cx, cy,
-                                         pts[i+1][0], pts[i+1][1], obs)):
-                    pts[i] = (cx, cy)
+                pts[i] = (
+                    (pts[i-1][0] + pts[i][0] + pts[i+1][0]) / 3.0,
+                    (pts[i-1][1] + pts[i][1] + pts[i+1][1]) / 3.0,
+                )
         return pts
    
     def shortcut_smooth(self, path, iterations=50):
@@ -1205,24 +1185,18 @@ class QuadRRTPlanner:
         if len(path) < 3:
             return path
 
-        # temporary check
+        import random
         new_path = list(path)
 
         obs = self.map.inflated_mask()
         for _ in range(iterations):
-            if len(new_path) < 3:
-                break
             i = random.randint(0, len(new_path) - 2)
             j = random.randint(i + 1, len(new_path) - 1)
-        
+
             x1, y1 = new_path[i]
             x2, y2 = new_path[j]
-            
-            result = self._collision_free(x1, y1, x2, y2, obs)
-            
-            if result and j - i > 1:   # ← use result directly
+            if self._collision_free(x1, y1, x2, y2, obs):
                 new_path = new_path[:i+1] + new_path[j:]
-        
         return new_path
 
 # ══════════════════════════════════════════════════════════════
