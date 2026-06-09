@@ -541,14 +541,14 @@ class QuadRRTPlanner:
 
     def _sample_from_grid(self):
     # ── Explicit goal bias FIRST (replaces old GOAL_BIAS) ──
-        if random.random() < GOAL_SAMPLE_RATE:   # 15%
-            theta  = random.uniform(0, 2 * math.pi)
-            radius = random.uniform(0, GOAL_REGION_RADIUS)
-            self.goal_samples += 1
-            return (
-                self._plan_gx + radius * math.cos(theta),
-                self._plan_gy + radius * math.sin(theta)
-            )
+        # if random.random() < GOAL_SAMPLE_RATE:   # 15%
+        #     theta  = random.uniform(0, 2 * math.pi)
+        #     radius = random.uniform(0, GOAL_REGION_RADIUS)
+        #     self.goal_samples += 1
+        #     return (
+        #         self._plan_gx + radius * math.cos(theta),
+        #         self._plan_gy + radius * math.sin(theta)
+        #     )
 
         # ── Remaining 85% → grid-based sampling ──
         n  = GRID_N
@@ -798,6 +798,9 @@ class QuadRRTPlanner:
                 if ex is None:
                     continue   # all escape levels failed, skip iteration
                 nx, ny = ex, ey  # use escape node instead
+
+            # Update heading for next iteration
+            self._current_heading = new_heading
 
             # Update heading for next iteration
             self._current_heading = new_heading
@@ -1259,15 +1262,10 @@ class QuadRRTPlanner:
         pts = list(waypoints)
         for _ in range(iterations):
             for i in range(1, len(pts) - 1):
-                cx = (pts[i-1][0] + pts[i][0] + pts[i+1][0]) / 3.0
-                cy = (pts[i-1][1] + pts[i][1] + pts[i+1][1]) / 3.0
-                # only move the point if new position is collision free
-                # on both connecting segments
-                if (self._collision_free(pts[i-1][0], pts[i-1][1],
-                                         cx, cy, obs) and
-                    self._collision_free(cx, cy,
-                                         pts[i+1][0], pts[i+1][1], obs)):
-                    pts[i] = (cx, cy)
+                pts[i] = (
+                    (pts[i-1][0] + pts[i][0] + pts[i+1][0]) / 3.0,
+                    (pts[i-1][1] + pts[i][1] + pts[i+1][1]) / 3.0,
+                )
         return pts
    
     def shortcut_smooth(self, path, iterations=50, obs=None):
@@ -1279,19 +1277,13 @@ class QuadRRTPlanner:
         new_path = list(path)
 
         for _ in range(iterations):
-            if len(new_path) < 3:
-                break
             i = random.randint(0, len(new_path) - 2)
             j = random.randint(i + 1, len(new_path) - 1)
-        
+
             x1, y1 = new_path[i]
             x2, y2 = new_path[j]
-            
-            result = self._collision_free(x1, y1, x2, y2, obs)
-            
-            if result and j - i > 1:   # ← use result directly
+            if self._collision_free(x1, y1, x2, y2, obs):
                 new_path = new_path[:i+1] + new_path[j:]
-        
         return new_path
 
 # ══════════════════════════════════════════════════════════════

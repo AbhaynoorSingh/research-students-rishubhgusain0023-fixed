@@ -4,7 +4,6 @@
 import math
 import time
 import numpy as np
-from scipy.ndimage import binary_dilation
 from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
@@ -60,95 +59,20 @@ class _OccupancyMap:
         self.log_odds = np.full((self.w, self.h), -1.0, dtype=np.float32)
 
     def add_test_obstacles(self):
-        """Complex environment for navigation stress testing."""
-    
-        # =========================================================
-        # CENTRAL WALL WITH SINGLE NARROW GAP
-        # =========================================================
-        for y in range(40, 360):
-    
-            # narrow opening
-            if 185 <= y <= 215:
-                continue
-    
-            for x in range(190, 205):
+        """Add artificial obstacles for RRT testing."""
+
+        # Vertical wall
+        for x in range(180, 190):
+            for y in range(120, 280):
                 self.log_odds[x, y] = self.L_MAX
-    
-        # =========================================================
-        # U-SHAPED TRAP
-        # =========================================================
-    
-        # Left wall
-        for x in range(300, 315):
-            for y in range(80, 220):
-                self.log_odds[x, y] = self.L_MAX
-    
-        # Bottom wall
-        for x in range(300, 380):
-            for y in range(80, 95):
-                self.log_odds[x, y] = self.L_MAX
-    
-        # Right wall
-        for x in range(365, 380):
-            for y in range(80, 220):
-                self.log_odds[x, y] = self.L_MAX
-    
-        # =========================================================
-        # MAZE-LIKE CORRIDOR SECTION
-        # =========================================================
-    
-        # Horizontal corridor blockers
-        for x in range(60, 180):
-            for y in range(260, 275):
-                self.log_odds[x, y] = self.L_MAX
-    
-        for x in range(120, 240):
-            for y in range(320, 335):
-                self.log_odds[x, y] = self.L_MAX
-    
-        # Vertical corridor blockers
-        for x in range(90, 105):
-            for y in range(150, 320):
-                self.log_odds[x, y] = self.L_MAX
-    
-        for x in range(230, 245):
-            for y in range(220, 390):
-                self.log_odds[x, y] = self.L_MAX
-    
-        # =========================================================
-        # CLUTTER REGION
-        # =========================================================
-        clutter = [
-            (40, 60),
-            (70, 90),
-            (100, 130),
-            (140, 110),
-            (160, 60),
-            (260, 260),
-            (280, 290),
-            (330, 320),
-        ]
-    
-        for cx, cy in clutter:
-            for x in range(cx, cx + 25):
-                for y in range(cy, cy + 25):
-                    self.log_odds[x, y] = self.L_MAX
-    
-        # =========================================================
-        # GOAL-AREA RESTRICTION
-        # =========================================================
-    
-        for x in range(320, 390):
-            for y in range(350, 365):
-                self.log_odds[x, y] = self.L_MAX
-    
-        for x in range(320, 335):
-            for y in range(280, 365):
+
+        # Small block obstacle
+        for x in range(250, 280):
+            for y in range(200, 230):
                 self.log_odds[x, y] = self.L_MAX
 
     def reset(self):
         self._reset_grid()
-        self.add_test_obstacles()
 
     # ── coordinate transforms ──────────────────────────────────
 
@@ -231,10 +155,8 @@ class _OccupancyMap:
         """Return [0,1] probability grid: 1.0 = definitely occupied."""
         return 1.0 - 1.0 / (1.0 + np.exp(self.log_odds))
       
-    def inflated_mask(self, inflation_m=0.30):
-        cells = max(1, int(inflation_m / self.res))
-        struct = np.ones((cells*2+1, cells*2+1), dtype=bool)
-        return binary_dilation(self.obstacle_mask(), structure=struct)
+    def inflated_mask(self):
+        return self.obstacle_mask()
 
     def obstacle_mask(self) -> np.ndarray:
         return self.probability_grid() > 0.65
