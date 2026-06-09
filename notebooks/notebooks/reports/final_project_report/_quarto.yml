@@ -1,0 +1,67 @@
+project:
+  type: book              # keep book features & numbering
+  output-dir: _output       # put everything in one place
+
+  render:
+    - index.qmd            
+book:
+  title: "Natural-Language-Driven Navigation on the ROSMASTER X3 PLUS"  # Change to your title of the project
+  subtitle: Deploying a Modular ROS 2 Pipeline with SLAM, Path Planning, and Object Detection on an Embedded Robotic Platform # Change to your sub-title of the project
+  author: "Rishubh Gusain"
+  date: April 21, 2026
+  reader-mode: true
+  page-footer:
+    left: |
+      Gusain, R. (2026). 
+    right: |
+      This book template was built with <a href="https://quarto.org/">Quarto</a>, Courtesy Dr. Sukhjit Singh Sehra.
+  # cover-image: cover.jpg
+  # favicon: cover.jpg
+  site-url: https://sabudh.org/
+  repo-url: https://github.com/wlu-labs/research-students-rishubhgusain0023
+  repo-branch: main
+  chapters:
+    - index.qmd
+# Update the following to your references file
+bibliography: references.bib
+
+format:
+  # ── 1. Multi-page HTML book ──────────────────────────────
+  html:
+    theme: united
+    code-line-numbers: true
+    code-link: true
+    self-contained: true
+    toc: true
+    number-sections: true
+    # Change the following to your names
+    author-meta: "Rishubh Gusain"
+
+  # # ── 2. PDF (single file) ─────────────────────────────────
+  titlepage-pdf:
+    documentclass: book
+    classoption: ["oneside", "open=any"]
+    number-sections: true
+    toc: true
+    lof: true
+    lot: true
+    titlepage: "bg-image"
+    titlepage-bg-image: "img/corner-logo.png"
+    titlepage-logo: "img/sabudh.png"
+    titlepage-header: "Wilfrid Laurier University"
+    # Change the following to your names
+    titlepage-footer: |
+      Gusain, Rishubh\
+      Department of Science, Computer Science
+    keep-tex: false
+    include-in-header:
+      text: |
+        \usepackage{babel}  
+
+
+  # ── 3. EPUB (single file) ────────────────────────────────
+  #epub:
+    #cover-image: img/coverpage.png     # optional—remove if you don’t have one
+    #toc: true
+    #embed-resources: true
+

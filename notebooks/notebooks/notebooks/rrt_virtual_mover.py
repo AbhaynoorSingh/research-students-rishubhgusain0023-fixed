@@ -87,6 +87,21 @@ GRID_N           = 10      # 10×10 grid over entire map
 GRID_DELTA       = 0.1     # attenuation factor for selection count
 GRID_P_BASE      = 0.05    # base probability every cell starts with
 
+
+
+# APF expansion constants (Component 2 — Section 3.2)
+APF_K_ATT       = 1.0    # attractive gain toward goal
+APF_K_RAND      = 0.4    # attractive gain toward random sample
+APF_K_REP       = 1.5    # repulsive gain from obstacles
+APF_D0          = 1.5    # repulsive influence range in metres
+APF_N_ADJ       = 2      # repulsive adjustment exponent
+APF_PSI_MAX     = math.radians(60)   # max heading change per step (60°)
+APF_ALPHA0      = math.radians(45)   # angle threshold for step reduction
+APF_P_OBS_THRESH = 0.5   # collision density threshold to suppress forces
+APF_N_DETECT    = 5      # number of perpendicular detection points
+
+
+
 # Virtual movement
 ROBOT_SPEED_MPS  = 0.3
 WAYPOINT_TOLERANCE = 0.10
@@ -384,6 +399,10 @@ class QuadRRTPlanner:
         self.grid_counts = {}   # how many times each cell has been sampled
         self.grid_nc     = 0    # obstacle count intersecting start-goal line
 
+        self._current_heading = 0.0   # tracked across iterations for heading constraint
+        self._density_cache_pos  = (None, None)
+        self._density_cache_val  = 0.0
+        self._density_cache_dist = 0.3   # reuse within 0.3m
 
 
 
@@ -518,6 +537,7 @@ class QuadRRTPlanner:
         # ── Eq. 13: normalise so all cells sum to 1.0 ──
         total = sum(raw_probs.values())
         self.grid_probs = {k: v / total for k, v in raw_probs.items()}
+        self._grid_keys = list(self.grid_probs.keys())
 
     def _sample_from_grid(self):
     # ── Explicit goal bias FIRST (replaces old GOAL_BIAS) ──
@@ -537,9 +557,8 @@ class QuadRRTPlanner:
         cw = (self.map.w * self.map.res) / n
         ch = (self.map.h * self.map.res) / n
 
-        keys    = list(self.grid_probs.keys())
-        weights = [self.grid_probs[k] for k in keys]
-        chosen  = random.choices(keys, weights=weights, k=1)[0]
+        weights = [self.grid_probs[k] for k in self._grid_keys]
+        chosen  = random.choices(self._grid_keys, weights=weights, k=1)[0]
         i, j    = chosen
 
         self.grid_counts[(i, j)] += 1
@@ -695,7 +714,7 @@ class QuadRRTPlanner:
         self.raw_path_length = 0.0
         self.smoothed_path_length = 0.0  
 
-        obs = self.map.inflated_mask()
+        obs = self.map.inflated_mask() 
 
         start_time = time.time()
 
@@ -717,8 +736,6 @@ class QuadRRTPlanner:
         sx, sy = start_world
         gx, gy = goal_world
 
-        self._plan_gx = gx
-        self._plan_gy = gy  
 
         # Validate start / goal
         scx, scy = self.map.world_to_cell(sx, sy)
@@ -731,6 +748,10 @@ class QuadRRTPlanner:
             if gcx is None:
                 return []
             gx, gy = self.map.cell_to_world(gcx, gcy)
+
+        self._plan_gx = gx
+        self._plan_gy = gy  
+
 
         # Map bounds in world coords
         wx_min = self.map.origin_x
@@ -745,7 +766,7 @@ class QuadRRTPlanner:
         goal_node_idx = None
         # ── Component 1: build grid probability table once ──
         self._init_sampling_grid(sx, sy, gx, gy, obs)
-        
+        self._current_heading = math.atan2(gy - sy, gx - sx)  # initial heading toward goal
 
         for _ in range(MAX_ITERATIONS):
             # Sample
@@ -756,13 +777,30 @@ class QuadRRTPlanner:
             # Nearest node
             nearest_idx = self.quadtree.nearest(rx, ry)[1]
             nearest     = nodes[nearest_idx]
+            # Steer — Component 2: APF-guided expansion
+            nx, ny, new_heading = self._apf_steer(
+                nearest.x, nearest.y,
+                rx, ry,
+                gx, gy,
+                obs
+            )
 
-            # Steer
-            nx, ny = self._steer(nearest.x, nearest.y, rx, ry)
-
-            # Collision check
+            # Collision check — with Component 3 escape fallback
             if not self._collision_free(nearest.x, nearest.y, nx, ny, obs):
-                continue
+                # Compute the step size that _apf_steer used
+                sadj = self._adaptive_step(nearest.x, nearest.y,
+                                           math.cos(new_heading),
+                                           math.sin(new_heading), obs)
+                ex, ey = self._side_retreat_escape(
+                    nearest.x, nearest.y,
+                    math.cos(new_heading), math.sin(new_heading),
+                    sadj, obs)
+                if ex is None:
+                    continue   # all escape levels failed, skip iteration
+                nx, ny = ex, ey  # use escape node instead
+
+            # Update heading for next iteration
+            self._current_heading = new_heading
 
             new_cost = nearest.cost + math.hypot(nx - nearest.x,
                                                   ny - nearest.y)
@@ -798,10 +836,10 @@ class QuadRRTPlanner:
         path = self._extract_path(nodes, goal_node_idx)
         raw_length = self.path_length(path)
         # Step 1: averaging smooth
-        path = self.smooth_path(path)
+        path = self.smooth_path(path, obs=obs)
 
         # Step 2: shortcut smooth (NEW)
-        path = self.shortcut_smooth(path)
+        path = self.shortcut_smooth(path, obs=obs)
         self.latest_nodes = nodes
         elapsed = time.time() - start_time
         smooth_length = self.path_length(path)
@@ -842,6 +880,262 @@ class QuadRRTPlanner:
                  for i, n in enumerate(nodes)]
         return min(dists)[1]
 
+
+
+    # ══════════════════════════════════════════════════════
+#  Component 2 — APF Expansion (Paper §3.2)
+# ══════════════════════════════════════════════════════
+
+    def _collision_density(self, nx, ny, gx, gy, obs):
+        # Return cached result if node is close to last checked position
+        cx_last, cy_last = self._density_cache_pos
+        if cx_last is not None:
+            if math.hypot(nx - cx_last, ny - cy_last) < self._density_cache_dist:
+                return self._density_cache_val
+    
+        Mx = gx - nx
+        My = gy - ny
+        M_mag = math.hypot(Mx, My) + 1e-6
+    
+        perp_x = -My / M_mag
+        perp_y =  Mx / M_mag
+    
+        probe_len = min(M_mag, 1.5)
+    
+        nl = APF_N_DETECT
+        ns = 0
+        for k in range(1, nl + 2):
+            t  = (k / (nl + 1)) - 0.5
+            tx = nx + t * perp_x * probe_len
+            ty = ny + t * perp_y * probe_len
+            cx, cy = self.map.world_to_cell(tx, ty)
+            if self.map.in_bounds(cx, cy) and obs[cx, cy]:
+                ns += 1
+    
+        result = ns / (nl + 1)
+        self._density_cache_pos = (nx, ny)
+        self._density_cache_val = result
+        return result            
+
+
+
+    def _adaptive_step(self, nx, ny, ux, uy, obs):
+        """
+        Equations 27–28: compute adjusted step size based on angle
+        between expansion direction and nearest obstacle direction.
+        Reduces step size when heading toward an obstacle.
+        Returns sadj in range [0.05, STEP_SIZE].
+        """
+        min_dist    = float('inf')
+        nearest_ox  = nx
+        nearest_oy  = ny
+
+        # Find closest obstacle cell — only search within APF_D0 radius
+        ncx = int((nx - self.map.origin_x) / self.map.res)
+        ncy = int((ny - self.map.origin_y) / self.map.res)
+        r_cells = int(APF_D0 / self.map.res) + 1
+        x0 = max(0, ncx - r_cells);  x1 = min(obs.shape[0], ncx + r_cells)
+        y0 = max(0, ncy - r_cells);  y1 = min(obs.shape[1], ncy + r_cells)
+        local_obs = np.argwhere(obs[x0:x1, y0:y1])
+
+        for cell in local_obs:
+            ox = (cell[0] + x0) * self.map.res + self.map.origin_x
+            oy = (cell[1] + y0) * self.map.res + self.map.origin_y
+            d  = math.hypot(nx - ox, ny - oy)
+            if d < min_dist:
+                min_dist   = d
+                nearest_ox = ox
+                nearest_oy = oy
+
+        # In open space — use full step size
+        if min_dist > APF_D0:
+            return STEP_SIZE
+
+        # Angle between expansion direction and direction to obstacle (Eq. 27)
+        v2x   = nearest_ox - nx
+        v2y   = nearest_oy - ny
+        v2mag = math.hypot(v2x, v2y) + 1e-6
+        cos_a = (ux * v2x + uy * v2y) / v2mag
+        alpha = math.acos(max(-1.0, min(1.0, cos_a)))
+
+        # Eq. 28 — reduce step when heading toward obstacle
+        sadj = STEP_SIZE * (0.5 + alpha / (2.0 * APF_ALPHA0))
+        return max(0.05, min(STEP_SIZE, sadj))
+
+
+
+
+    def _apf_steer(self, nx, ny, rx, ry, gx, gy, obs):
+        """
+        Core Component 2 method — replaces _steer().
+        Computes Ftotal from attractive + repulsive forces,
+        applies heading constraint and adaptive step size,
+        returns (new_x, new_y, new_heading).
+
+        Paper references:
+        Attractive forces  : Eq. 14–17
+        Repulsive forces   : Eq. 18–21
+        Density suppression: Eq. 22–23
+        Heading constraint : Eq. 25–26
+        Adaptive step      : Eq. 27–28
+        """
+
+        # ── 1. Attractive force toward goal (Eq. 14, 4) ──────────
+        d_goal   = math.hypot(gx - nx, gy - ny) + 1e-6
+        # Skip full APF when very close to goal — just steer directly
+        if d_goal <= STEP_SIZE * 2:
+            ux = (gx - nx) / d_goal
+            uy = (gy - ny) / d_goal
+            return nx + STEP_SIZE * ux, ny + STEP_SIZE * uy, math.atan2(uy, ux)
+        Fatt_gx  = APF_K_ATT * (gx - nx) / d_goal
+        Fatt_gy  = APF_K_ATT * (gy - ny) / d_goal
+
+        # ── 2. Attractive force toward random sample (Eq. 15, 4) ─
+        d_rand   = math.hypot(rx - nx, ry - ny) + 1e-6
+        Fatt_rx  = APF_K_RAND * (rx - nx) / d_rand
+        Fatt_ry  = APF_K_RAND * (ry - ny) / d_rand
+
+        # ── 3. Combined attractive force (Eq. 16–17) ─────────────
+        Fatt_x   = Fatt_gx + Fatt_rx
+        Fatt_y   = Fatt_gy + Fatt_ry
+
+        # ── 4. Repulsive forces from obstacle cells (Eq. 18–21) ──
+        Frep_x   = 0.0
+        Frep_y   = 0.0
+
+        # Pre-filter: only keep obstacle cells within APF_D0 range
+        ncx = int((nx - self.map.origin_x) / self.map.res)
+        ncy = int((ny - self.map.origin_y) / self.map.res)
+        r_cells = int(APF_D0 / self.map.res) + 1
+        x0 = max(0, ncx - r_cells);  x1 = min(obs.shape[0], ncx + r_cells)
+        y0 = max(0, ncy - r_cells);  y1 = min(obs.shape[1], ncy + r_cells)
+        local_obs = np.argwhere(obs[x0:x1, y0:y1])
+        if len(local_obs) > 0:
+            local_obs[:, 0] += x0
+            local_obs[:, 1] += y0
+
+        n_obs = max(1, len(local_obs))
+
+        for cell in local_obs:
+            ox  = cell[0] * self.map.res + self.map.origin_x
+            oy  = cell[1] * self.map.res + self.map.origin_y
+            di  = math.hypot(nx - ox, ny - oy) + 1e-6
+
+            if di > APF_D0:
+                continue                    # outside influence range
+
+            Ai_A = 1.0 / n_obs             # simplified area ratio
+
+            # Direction from obstacle to current node
+            dox  = (nx - ox) / di
+            doy  = (ny - oy) / di
+
+            # Basic repulsive force (Eq. 20) — scaled by dist-to-goal
+            rep_coeff = (APF_K_REP * Ai_A
+                        * (1.0/di - 1.0/APF_D0)
+                        * (d_goal ** APF_N_ADJ)
+                        / (di ** 2))
+            Frep_x  += rep_coeff * dox
+            Frep_y  += rep_coeff * doy
+
+            # Additional repulsive term (Eq. 21) — goal-direction component
+            # Diminishes when far from goal, grows when close
+            add_coeff = ((APF_N_ADJ / 2.0) * APF_K_REP * Ai_A
+                        * ((1.0/di - 1.0/APF_D0) ** 2)
+                        * (APF_N_ADJ - 1)
+                        * (d_goal ** (APF_N_ADJ - 1)))
+            goal_dx  = (gx - nx) / d_goal
+            goal_dy  = (gy - ny) / d_goal
+            Frep_x  += add_coeff * goal_dx
+            Frep_y  += add_coeff * goal_dy
+
+        # ── 5. Collision density suppression (Eq. 22–23) ─────────
+        # When current neighbourhood is too dense, suppress both
+        # attractive and repulsive forces to let the tree grow freely
+        P_obs = self._collision_density(nx, ny, gx, gy, obs) if random.random() < 0.3 else 0.0
+        if P_obs > APF_P_OBS_THRESH:
+            Fatt_x *= 0.01;  Fatt_y *= 0.01
+            Frep_x *= 0.01;  Frep_y *= 0.01
+
+        # ── 6. Resultant force direction ──────────────────────────
+        Ftotal_x = Fatt_x + Frep_x
+        Ftotal_y = Fatt_y + Frep_y
+        F_mag    = math.hypot(Ftotal_x, Ftotal_y) + 1e-6
+        ux       = Ftotal_x / F_mag
+        uy       = Ftotal_y / F_mag
+
+        # ── 7. Heading constraint (Eq. 25–26) ────────────────────
+        desired_psi = math.atan2(uy, ux)
+        delta_psi   = math.atan2(
+            math.sin(desired_psi - self._current_heading),
+            math.cos(desired_psi - self._current_heading)
+        )
+        # Clamp to ±ψmax
+        delta_psi   = max(-APF_PSI_MAX, min(APF_PSI_MAX, delta_psi))
+        new_heading = self._current_heading + delta_psi
+        ux          = math.cos(new_heading)
+        uy          = math.sin(new_heading)
+
+        # ── 8. Adaptive step size (Eq. 27–28) ────────────────────
+        sadj        = self._adaptive_step(nx, ny, ux, uy, obs)
+
+        # ── 9. New node position ──────────────────────────────────
+        new_x = nx + sadj * ux
+        new_y = ny + sadj * uy
+
+        return new_x, new_y, new_heading
+
+
+    def _side_retreat_escape(self, nearest_x, nearest_y, ux, uy, sadj, obs):
+        """
+        Hierarchical side-retreat escape 
+        Called when normal APF expansion collides.
+        Returns (nx, ny) of a valid escape node, or None if all levels fail.
+        """
+        rotations = []
+        for theta_deg in [10, 20, 30, 40, 50]:
+            theta = math.radians(theta_deg)
+            rotations.append((math.cos(theta), math.sin(theta), 1))
+            rotations.append((math.cos(theta), math.sin(theta), -1))
+        
+        # Level 1 — half-step backward retraction
+        hx = nearest_x + (sadj / 2.0) * ux
+        hy = nearest_y + (sadj / 2.0) * uy
+        if self._collision_free(nearest_x, nearest_y, hx, hy, obs):
+            return hx, hy
+    
+        # Level 2 — side-shift exploration 
+        for cos_a, sin_a, sign in rotations:
+            rx = cos_a * ux - sign * sin_a * uy
+            ry = sign * sin_a * ux + cos_a * uy
+            tx = nearest_x + sadj * rx
+            ty = nearest_y + sadj * ry
+            if self._collision_free(nearest_x, nearest_y, tx, ty, obs):
+                return tx, ty
+    
+        # Level 3 — chain-shift: two half-steps with rotation (Eq. 31)
+        for theta_deg in [10, 20, 30, 40, 50]:
+            theta = math.radians(theta_deg)
+            for sign in [1, -1]:
+                angle = sign * theta
+                cos_a = math.cos(angle)
+                sin_a = math.sin(angle)
+                rx = cos_a * ux - sin_a * uy
+                ry = sin_a * ux + cos_a * uy
+                # step k=0
+                x0 = nearest_x + (sadj / 2.0) * rx
+                y0 = nearest_y + (sadj / 2.0) * ry
+                if not self._collision_free(nearest_x, nearest_y, x0, y0, obs):
+                    continue
+                # step k=1
+                x1 = x0 + (sadj / 2.0) * rx
+                y1 = y0 + (sadj / 2.0) * ry
+                if self._collision_free(x0, y0, x1, y1, obs):
+                    return x1, y1
+    
+        return None, None
+
+
     def _steer(self, fx, fy, tx, ty):
         d = math.hypot(tx - fx, ty - fy)
         if d <= STEP_SIZE:
@@ -870,7 +1164,7 @@ class QuadRRTPlanner:
         nx, ny, RRT_STAR_RADIUS
         )
 
-        radius = max(0.5,min(RRT_STAR_RADIUS,2.0 * math.sqrt(math.log(len(nodes)+1)/(len(nodes)+1))))
+        radius = max(0.3, min(0.6, 2.0 * math.sqrt(math.log(len(nodes)+1)/(len(nodes)+1))))
         for i in nearby:
             node = nodes[i]
             d = math.hypot(node.x - nx, node.y - ny)
@@ -886,8 +1180,7 @@ class QuadRRTPlanner:
         if best_parent is None:
             # Fall back to nearest
             best_parent = self._nearest(nodes, nx, ny)
-            p = nodes[best_parent]
-            best_cost = p.cost + math.hypot(p.x - nx, p.y - ny)
+            best_cost = default_cost
         return RRTNode(nx, ny, parent=best_parent, cost=best_cost), best_parent
 
     def _rewire(self, nodes, new_idx, obs):
@@ -899,7 +1192,7 @@ class QuadRRTPlanner:
         RRT_STAR_RADIUS
         )
 
-        radius = max(0.5,min(RRT_STAR_RADIUS,2.0 * math.sqrt(math.log(len(nodes)+1)/(len(nodes)+1))))
+        radius = max(0.3, min(0.6, 2.0 * math.sqrt(math.log(len(nodes)+1)/(len(nodes)+1))))
         for i in nearby:
             node = nodes[i]
             if i == new_idx or i == new_node.parent:
@@ -958,10 +1251,11 @@ class QuadRRTPlanner:
                         return nx, ny
         return None, None
 
-    def smooth_path(self, waypoints, iterations=50):
+    def smooth_path(self, waypoints, iterations=50, obs=None):
         if len(waypoints) < 3:
             return waypoints
-        obs = self.map.inflated_mask()
+        if obs is None:
+            obs = self.map.inflated_mask()
         pts = list(waypoints)
         for _ in range(iterations):
             for i in range(1, len(pts) - 1):
@@ -976,16 +1270,14 @@ class QuadRRTPlanner:
                     pts[i] = (cx, cy)
         return pts
    
-    def shortcut_smooth(self, path, iterations=50):
+    def shortcut_smooth(self, path, iterations=50, obs=None):
         """Remove unnecessary waypoints by connecting distant nodes directly."""
         if len(path) < 3:
             return path
 
-        obs = self.map.inflated_mask()
         # temporary check
         new_path = list(path)
 
-        obs = self.map.inflated_mask()
         for _ in range(iterations):
             if len(new_path) < 3:
                 break
