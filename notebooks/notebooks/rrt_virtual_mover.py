@@ -93,12 +93,12 @@ GRID_P_BASE      = 0.05    # base probability every cell starts with
 APF_K_ATT       = 1.0    # attractive gain toward goal
 APF_K_RAND      = 0.4    # attractive gain toward random sample
 APF_K_REP       = 1.5    # repulsive gain from obstacles
-APF_D0          = 0.8    # repulsive influence range in metres
+APF_D0          = 1.5    # repulsive influence range in metres
 APF_N_ADJ       = 2      # repulsive adjustment exponent
 APF_PSI_MAX     = math.radians(60)   # max heading change per step (60°)
 APF_ALPHA0      = math.radians(45)   # angle threshold for step reduction
 APF_P_OBS_THRESH = 0.5   # collision density threshold to suppress forces
-APF_N_DETECT    = 3      # number of perpendicular detection points
+APF_N_DETECT    = 5      # number of perpendicular detection points
 
 
 
@@ -154,24 +154,6 @@ class OccupancyMap:
                 err -= dy; x0 += sx
             if e2 < dx:
                 err += dx; y0 += sy
-
-
-    def collision_free_fast(self, x0, y0, x1, y1, obs):
-        """Numpy-based line collision check — 10x faster than Bresenham generator."""
-        cx0 = int((x0 - self.origin_x) / self.res)
-        cy0 = int((y0 - self.origin_y) / self.res)
-        cx1 = int((x1 - self.origin_x) / self.res)
-        cy1 = int((y1 - self.origin_y) / self.res)
-
-        steps = max(abs(cx1 - cx0), abs(cy1 - cy0), 1)
-        xs = np.round(np.linspace(cx0, cx1, steps + 1)).astype(int)
-        ys = np.round(np.linspace(cy0, cy1, steps + 1)).astype(int)
-
-        # Clamp to bounds
-        valid = (xs >= 0) & (xs < self.w) & (ys >= 0) & (ys < self.h)
-        if not np.all(valid):
-            return False
-        return not np.any(obs[xs, ys])            
 
     def update(self, scan, robot_x, robot_y, robot_yaw):
         rx, ry = self.world_to_cell(robot_x, robot_y)
@@ -384,14 +366,13 @@ class QuadTree:
 #  RRT / RRT* Planner
 # ══════════════════════════════════════════════════════════════
 class RRTNode:
-    __slots__ = ("x", "y", "parent", "cost","heading")
+    __slots__ = ("x", "y", "parent", "cost")
 
-    def __init__(self, x, y, parent=None, cost=0.0 , heading=0.0):
+    def __init__(self, x, y, parent=None, cost=0.0):
         self.x      = x
         self.y      = y
         self.parent = parent   # index into node list
         self.cost   = cost     # RRT* path cost from root
-        self.heading = heading   # ← heading when this node was created
 
 
 class QuadRRTPlanner:
@@ -554,7 +535,6 @@ class QuadRRTPlanner:
         # ── Eq. 13: normalise so all cells sum to 1.0 ──
         total = sum(raw_probs.values())
         self.grid_probs = {k: v / total for k, v in raw_probs.items()}
-        self._grid_keys = list(self.grid_probs.keys())  # cache for _sample_from_grid
 
     def _sample_from_grid(self):
     # ── Explicit goal bias FIRST (replaces old GOAL_BIAS) ──
@@ -574,12 +554,9 @@ class QuadRRTPlanner:
         cw = (self.map.w * self.map.res) / n
         ch = (self.map.h * self.map.res) / n
 
-       # Use pre-sorted keys — only rebuild if needed
-        if not hasattr(self, '_grid_keys'):
-            self._grid_keys = list(self.grid_probs.keys())
-
-        weights = [self.grid_probs[k] for k in self._grid_keys]
-        chosen  = random.choices(self._grid_keys, weights=weights, k=1)[0]
+        keys    = list(self.grid_probs.keys())
+        weights = [self.grid_probs[k] for k in keys]
+        chosen  = random.choices(keys, weights=weights, k=1)[0]
         i, j    = chosen
 
         self.grid_counts[(i, j)] += 1
@@ -587,9 +564,9 @@ class QuadRRTPlanner:
 
         total = sum(self.grid_probs.values())
         if total < 0.5:
-            self.grid_probs  = {k: v/total for k, v in self.grid_probs.items()}
-            self._grid_keys  = list(self.grid_probs.keys())  # rebuild after renorm
+            self.grid_probs = {k: v/total for k, v in self.grid_probs.items()}
 
+        # Check if this cell is near goal — count accordingly
         cell_cx = ox + (i + 0.5) * cw
         cell_cy = oy + (j + 0.5) * ch
         if math.hypot(cell_cx - self._plan_gx,
@@ -781,15 +758,14 @@ class QuadRRTPlanner:
         wy_min = self.map.origin_y
         wy_max = self.map.origin_y + self.map.h * self.map.res
 
-        nodes = [RRTNode(sx, sy, parent=None, cost=0.0,
-                 heading=math.atan2(gy - sy, gx - sx))]
+        nodes = [RRTNode(sx, sy, parent=None, cost=0.0)]
         self.quadtree.insert(
         QuadTreeNode(sx, sy, 0)
         )
         goal_node_idx = None
         # ── Component 1: build grid probability table once ──
         self._init_sampling_grid(sx, sy, gx, gy, obs)
-        children_map = {}
+        self._current_heading = math.atan2(gy - sy, gx - sx)  # initial heading toward goal
 
         for _ in range(MAX_ITERATIONS):
             # Sample
@@ -800,14 +776,6 @@ class QuadRRTPlanner:
             # Nearest node
             nearest_idx = self.quadtree.nearest(rx, ry)[1]
             nearest     = nodes[nearest_idx]
-            self._current_heading = nearest.heading
-
-            # ── Quick pre-check with geometric steer ──
-            # Avoids running expensive APF on doomed iterations
-            px, py = self._steer(nearest.x, nearest.y, rx, ry)
-            if not self._collision_free(nearest.x, nearest.y, px, py, obs):
-                continue
-
             # Steer — Component 2: APF-guided expansion
             nx, ny, new_heading = self._apf_steer(
                 nearest.x, nearest.y,
@@ -820,7 +788,8 @@ class QuadRRTPlanner:
             if not self._collision_free(nearest.x, nearest.y, nx, ny, obs):
                 continue
 
-         
+            # Update heading for next iteration
+            self._current_heading = new_heading
 
             new_cost = nearest.cost + math.hypot(nx - nearest.x,
                                                   ny - nearest.y)
@@ -829,19 +798,16 @@ class QuadRRTPlanner:
                 # RRT*: find neighbours and choose best parent
                 new_node, parent_idx = self._choose_parent(
                     nodes, nx, ny, new_cost, obs)
-                new_node.heading = new_heading 
                 new_idx = len(nodes)
                 nodes.append(new_node)
-                children_map.setdefault(parent_idx, []).append(new_idx)
                 self.quadtree.insert(
                 QuadTreeNode(nx, ny, len(nodes)-1)
                 )   
                 # Rewire
-                self._rewire(nodes, new_idx, obs, children_map)
+                self._rewire(nodes, new_idx, obs)
             else:
-                new_node = RRTNode(nx, ny, parent=nearest_idx, cost=new_cost , heading=new_heading)
+                new_node = RRTNode(nx, ny, parent=nearest_idx, cost=new_cost)
                 nodes.append(new_node)
-                children_map.setdefault(nearest_idx, []).append(len(nodes)-1)
                 self.quadtree.insert(
                 QuadTreeNode(nx, ny, len(nodes)-1)
                 )
@@ -859,10 +825,10 @@ class QuadRRTPlanner:
         path = self._extract_path(nodes, goal_node_idx)
         raw_length = self.path_length(path)
         # Step 1: averaging smooth
-        path = self.smooth_path(path,obs)
+        path = self.smooth_path(path)
 
         # Step 2: shortcut smooth (NEW)
-        path = self.shortcut_smooth(path,obs)
+        path = self.shortcut_smooth(path)
         self.latest_nodes = nodes
         elapsed = time.time() - start_time
         smooth_length = self.path_length(path)
@@ -948,17 +914,11 @@ class QuadRRTPlanner:
         nearest_ox  = nx
         nearest_oy  = ny
 
-        # Find closest obstacle cell — only search within APF_D0 radius
-        ncx = int((nx - self.map.origin_x) / self.map.res)
-        ncy = int((ny - self.map.origin_y) / self.map.res)
-        r_cells = int(APF_D0 / self.map.res) + 1
-        x0 = max(0, ncx - r_cells);  x1 = min(obs.shape[0], ncx + r_cells)
-        y0 = max(0, ncy - r_cells);  y1 = min(obs.shape[1], ncy + r_cells)
-        local_obs = np.argwhere(obs[x0:x1, y0:y1])
-
-        for cell in local_obs:
-            ox = (cell[0] + x0) * self.map.res + self.map.origin_x
-            oy = (cell[1] + y0) * self.map.res + self.map.origin_y
+        # Find closest obstacle cell in world coords
+        # obs_cells = np.argwhere(obs)
+        for cell in obs_cells:
+            ox = cell[0] * self.map.res + self.map.origin_x
+            oy = cell[1] * self.map.res + self.map.origin_y
             d  = math.hypot(nx - ox, ny - oy)
             if d < min_dist:
                 min_dist   = d
@@ -1015,21 +975,10 @@ class QuadRRTPlanner:
         # ── 4. Repulsive forces from obstacle cells (Eq. 18–21) ──
         Frep_x   = 0.0
         Frep_y   = 0.0
+        # obs_cells = np.argwhere(obs)
+        n_obs     = max(1, len(obs_cells))
 
-        # Pre-filter: only keep obstacle cells within APF_D0 range
-        ncx = int((nx - self.map.origin_x) / self.map.res)
-        ncy = int((ny - self.map.origin_y) / self.map.res)
-        r_cells = int(APF_D0 / self.map.res) + 1
-        x0 = max(0, ncx - r_cells);  x1 = min(obs.shape[0], ncx + r_cells)
-        y0 = max(0, ncy - r_cells);  y1 = min(obs.shape[1], ncy + r_cells)
-        local_obs = np.argwhere(obs[x0:x1, y0:y1])
-        if len(local_obs) > 0:
-            local_obs[:, 0] += x0
-            local_obs[:, 1] += y0
-
-        n_obs = max(1, len(local_obs))
-
-        for cell in local_obs:
+        for cell in obs_cells:
             ox  = cell[0] * self.map.res + self.map.origin_x
             oy  = cell[1] * self.map.res + self.map.origin_y
             di  = math.hypot(nx - ox, ny - oy) + 1e-6
@@ -1065,20 +1014,10 @@ class QuadRRTPlanner:
         # ── 5. Collision density suppression (Eq. 22–23) ─────────
         # When current neighbourhood is too dense, suppress both
         # attractive and repulsive forces to let the tree grow freely
-         # ── 5. Collision density suppression — skip if no local obstacles ──
-        min_local_dist = float('inf')
-        for cell in local_obs:
-            ox = cell[0] * self.map.res + self.map.origin_x
-            oy = cell[1] * self.map.res + self.map.origin_y
-            d  = math.hypot(nx - ox, ny - oy)
-            if d < min_local_dist:
-                min_local_dist = d
-
-        if min_local_dist < 0.6:
-            P_obs = self._collision_density(nx, ny, gx, gy, obs)
-            if P_obs > APF_P_OBS_THRESH:
-                Fatt_x *= 0.01;  Fatt_y *= 0.01
-                Frep_x *= 0.01;  Frep_y *= 0.01
+        P_obs = self._collision_density(nx, ny, gx, gy, obs)
+        if P_obs > APF_P_OBS_THRESH:
+            Fatt_x *= 0.01;  Fatt_y *= 0.01
+            Frep_x *= 0.01;  Frep_y *= 0.01
 
         # ── 6. Resultant force direction ──────────────────────────
         Ftotal_x = Fatt_x + Frep_x
@@ -1121,16 +1060,29 @@ class QuadRRTPlanner:
       
 
     def _collision_free(self, x0, y0, x1, y1, obs):
-        return self.map.collision_free_fast(x0, y0, x1, y1, obs)
+        """Check line segment for collisions using Bresenham."""
+        cx0, cy0 = self.map.world_to_cell(x0, y0)
+        cx1, cy1 = self.map.world_to_cell(x1, y1)
+        for cx, cy in self.map._bresenham(cx0, cy0, cx1, cy1):
+            if not self.map.in_bounds(cx, cy):
+                return False
+            if obs[cx, cy]:
+                return False
+        return True
 
     def _choose_parent(self, nodes, nx, ny, default_cost, obs):
+        """RRT*: pick parent that gives lowest cost."""
         best_parent = None
         best_cost   = float('inf')
-        radius      = RRT_STAR_RADIUS
-        nearby      = self.quadtree.query_radius(nx, ny, radius)
+        nearby = self.quadtree.query_radius(
+        nx, ny, RRT_STAR_RADIUS
+        )
+
+        radius = max(0.5,min(RRT_STAR_RADIUS,2.0 * math.sqrt(math.log(len(nodes)+1)/(len(nodes)+1))))
         for i in nearby:
             node = nodes[i]
             d = math.hypot(node.x - nx, node.y - ny)
+
             if d > radius:
                 continue
             if not self._collision_free(node.x, node.y, nx, ny, obs):
@@ -1140,50 +1092,60 @@ class QuadRRTPlanner:
                 best_cost   = c
                 best_parent = i
         if best_parent is None:
+            # Fall back to nearest
             best_parent = self._nearest(nodes, nx, ny)
-            best_cost   = default_cost
-        # heading=0.0 placeholder — caller sets it after
+            p = nodes[best_parent]
+            best_cost = p.cost + math.hypot(p.x - nx, p.y - ny)
         return RRTNode(nx, ny, parent=best_parent, cost=best_cost), best_parent
 
-
-
-    def _rewire(self, nodes, new_idx, obs, children_map):
+    def _rewire(self, nodes, new_idx, obs):
+        """RRT*: check if routing through new_node shortens neighbour costs."""
         new_node = nodes[new_idx]
-        radius   = RRT_STAR_RADIUS
-        nearby   = self.quadtree.query_radius(new_node.x, new_node.y, radius)
+        nearby = self.quadtree.query_radius(
+        new_node.x,
+        new_node.y,
+        RRT_STAR_RADIUS
+        )
 
-        # No longer rebuild children map here — use passed-in map
+        radius = max(0.5,min(RRT_STAR_RADIUS,2.0 * math.sqrt(math.log(len(nodes)+1)/(len(nodes)+1))))
         for i in nearby:
             node = nodes[i]
             if i == new_idx or i == new_node.parent:
                 continue
             d = math.hypot(node.x - new_node.x, node.y - new_node.y)
+
             if d > radius:
                 continue
             new_cost = new_node.cost + d
             if new_cost < node.cost and \
-            self._collision_free(new_node.x, new_node.y,
+               self._collision_free(new_node.x, new_node.y,
                                     node.x, node.y, obs):
-                # Update children map when parent changes
-                old_parent = node.parent
-                if old_parent in children_map and i in children_map[old_parent]:
-                    children_map[old_parent].remove(i)
                 node.parent = new_idx
-                children_map.setdefault(new_idx, []).append(i)
                 self.rewire_count += 1
-                node.cost = new_cost
-                self._update_children_costs(nodes, i, children_map)
+                node.cost   = new_cost
+                self._update_children_costs(nodes, i)
 
-    def _update_children_costs(self, nodes, parent_idx, children):
-        """O(depth) BFS using pre-built children map."""
-        queue = [parent_idx]
-        while queue:
-            pid = queue.pop(0)
-            for child_idx in children.get(pid, []):
-                nodes[child_idx].cost = nodes[pid].cost + math.hypot(
-                    nodes[child_idx].x - nodes[pid].x,
-                    nodes[child_idx].y - nodes[pid].y)
-                queue.append(child_idx)
+    def _update_children_costs(self, nodes, parent_idx):
+        """
+        Recursively update costs of all descendants
+        after a rewire operation.
+        """
+
+        parent = nodes[parent_idx]
+
+        for i, node in enumerate(nodes):
+
+            if node.parent == parent_idx:
+
+                edge_cost = math.hypot(
+                    node.x - parent.x,
+                    node.y - parent.y
+                )
+
+                node.cost = parent.cost + edge_cost
+
+                # Recursively update grandchildren
+                self._update_children_costs(nodes, i)
 
     def _extract_path(self, nodes, goal_idx):
         path = []
@@ -1204,47 +1166,37 @@ class QuadRRTPlanner:
                         return nx, ny
         return None, None
 
-    def smooth_path(self, waypoints, obs, iterations=20):
+    @staticmethod
+    def smooth_path(waypoints, iterations=50):
+        """Simple path smoothing by averaging neighbours."""
         if len(waypoints) < 3:
             return waypoints
-        # obs = self.map.inflated_mask()
         pts = list(waypoints)
         for _ in range(iterations):
             for i in range(1, len(pts) - 1):
-                cx = (pts[i-1][0] + pts[i][0] + pts[i+1][0]) / 3.0
-                cy = (pts[i-1][1] + pts[i][1] + pts[i+1][1]) / 3.0
-                # only move the point if new position is collision free
-                # on both connecting segments
-                if (self._collision_free(pts[i-1][0], pts[i-1][1],
-                                         cx, cy, obs) and
-                    self._collision_free(cx, cy,
-                                         pts[i+1][0], pts[i+1][1], obs)):
-                    pts[i] = (cx, cy)
+                pts[i] = (
+                    (pts[i-1][0] + pts[i][0] + pts[i+1][0]) / 3.0,
+                    (pts[i-1][1] + pts[i][1] + pts[i+1][1]) / 3.0,
+                )
         return pts
    
-    def shortcut_smooth(self, path, obs, iterations=20):
+    def shortcut_smooth(self, path, iterations=50):
         """Remove unnecessary waypoints by connecting distant nodes directly."""
         if len(path) < 3:
             return path
 
-        # temporary check
+        import random
         new_path = list(path)
 
-        # obs = self.map.inflated_mask()
+        obs = self.map.inflated_mask()
         for _ in range(iterations):
-            if len(new_path) < 3:
-                break
             i = random.randint(0, len(new_path) - 2)
             j = random.randint(i + 1, len(new_path) - 1)
-        
+
             x1, y1 = new_path[i]
             x2, y2 = new_path[j]
-            
-            result = self._collision_free(x1, y1, x2, y2, obs)
-            
-            if result and j - i > 1:   # ← use result directly
+            if self._collision_free(x1, y1, x2, y2, obs):
                 new_path = new_path[:i+1] + new_path[j:]
-        
         return new_path
 
 # ══════════════════════════════════════════════════════════════

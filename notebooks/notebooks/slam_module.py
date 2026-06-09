@@ -4,7 +4,6 @@
 import math
 import time
 import numpy as np
-from scipy.ndimage import binary_dilation
 from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
@@ -61,19 +60,19 @@ class _OccupancyMap:
 
     def add_test_obstacles(self):
         """Add artificial obstacles for RRT testing."""
-            # Vertical wall
+
+        # Vertical wall
         for x in range(180, 190):
             for y in range(120, 280):
                 self.log_odds[x, y] = self.L_MAX
 
-            # Small block obstacle
+        # Small block obstacle
         for x in range(250, 280):
             for y in range(200, 230):
-                self.log_odds[x, y] = self.L_MAX    
+                self.log_odds[x, y] = self.L_MAX
 
     def reset(self):
         self._reset_grid()
-        self.add_test_obstacles()
 
     # ── coordinate transforms ──────────────────────────────────
 
@@ -108,23 +107,6 @@ class _OccupancyMap:
             if e2 < dx:
                 err += dx
                 y0  += sy
-
-    def collision_free_fast(self, x0, y0, x1, y1, obs):
-        """Numpy-based line collision check — faster than Bresenham generator."""
-        cx0 = int((x0 - self.origin_x) / self.res)
-        cy0 = int((y0 - self.origin_y) / self.res)
-        cx1 = int((x1 - self.origin_x) / self.res)
-        cy1 = int((y1 - self.origin_y) / self.res)
-
-        steps = max(abs(cx1 - cx0), abs(cy1 - cy0), 1)
-        xs = np.round(np.linspace(cx0, cx1, steps + 1)).astype(int)
-        ys = np.round(np.linspace(cy0, cy1, steps + 1)).astype(int)
-
-        valid = (xs >= 0) & (xs < self.w) & (ys >= 0) & (ys < self.h)
-        if not np.all(valid):
-            return False
-        return not np.any(obs[xs, ys])
-
 
     # ── map update from a single scan ─────────────────────────
 
@@ -173,10 +155,8 @@ class _OccupancyMap:
         """Return [0,1] probability grid: 1.0 = definitely occupied."""
         return 1.0 - 1.0 / (1.0 + np.exp(self.log_odds))
       
-    def inflated_mask(self, inflation_m=0.30):
-        cells = max(1, int(inflation_m / self.res))
-        struct = np.ones((cells*2+1, cells*2+1), dtype=bool)
-        return binary_dilation(self.obstacle_mask(), structure=struct)
+    def inflated_mask(self):
+        return self.obstacle_mask()
 
     def obstacle_mask(self) -> np.ndarray:
         return self.probability_grid() > 0.65
